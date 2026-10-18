@@ -159,3 +159,12 @@ def test_trace_is_explicitly_planned_and_records_calibrated_device_points():
     assert trace["samples"][0]["device_xy"] == (10, 159)
     assert trace["duration_ms"] == 120
 
+
+def test_android_wire_plan_is_a_single_timed_single_pointer_batch():
+    trajectory = plan_straight((.1, .8), (.9, .2), duration_ms=120,
+                               interval_ms=60)
+    wire = trajectory.wire_command(Calibration((100, 200)))
+    assert wire.startswith("PLAN 0,10,159;")
+    assert wire.endswith("120,89,40")
+    assert len(wire[5:].split(";")) == 3
+
