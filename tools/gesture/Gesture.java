@@ -103,8 +103,10 @@ public final class Gesture {
         Point last = points[0];
         try {
             downTime = uptimeMillis();
-            send(downTime, MotionAction.DOWN, last);
             down = true;
+            // Attempt CANCEL even if DOWN reports an injection error after reaching the
+            // framework; a partial press must never be left hanging.
+            send(downTime, MotionAction.DOWN, last);
             System.out.println("START " + downTime);
             System.out.flush();
             for (int i = 1; i < points.length; i++) {
