@@ -135,7 +135,7 @@ class Runner:
                  pause_file: Optional[Path] = None, tree_reader=None,
                  roster: tuple[str, ...] = (),
                  account_profiles: Optional[dict] = None,
-                 notifier=None):
+                 notifier=None, device_service=None):
         self.cfg = cfg
         #: Optional Discord notifications. A null object by default so no call
         #: site below needs a guard (see notify.NullNotifier).
@@ -152,7 +152,7 @@ class Runner:
         #: None, because None is a real account state ("we never learned who we are") and
         #: must still get the defaults applied once.
         self._profile_account: object = _UNSET
-        self._foreground_checked_at = -1e9
+        self.device_service = device_service or device.NullDeviceService()
         self.source = source
         self.actuator = actuator
         self.perceptor = perceptor
@@ -199,6 +199,7 @@ class Runner:
         self._enc_ring: deque = deque(maxlen=max(8, int(cfg.infer_fps * ENCOUNTER_RING_SECONDS)))
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
+        self.ctx.last_scan_progress_ts = self.ctx.now
         self.ctx.last_map_ts = time.perf_counter()
         # A standing fact about the run, so a pure handler can tell "no view this tick"
         # from "there will never be a view" - see `fsm.Context.tree_available` and
@@ -604,34 +605,16 @@ class Runner:
                     cfg.restock_max_seconds)
 
     def _refresh_foreground(self, real: float, on_map: bool) -> None:
-        """Ask whether the GAME is the app on screen. Only while recovering.
-
-        `dumpsys window` costs ~0.1-0.3s and blocks this thread, which is cheap beside a
-        uiautomator dump but far too dear per frame, so it is asked only in the state that
-        has run out of other explanations and only every `FOREGROUND_CHECK` seconds.
-        Everywhere else the answer stays whatever it was, and UNKNOWN until first asked -
-        which the ladder treats as "say nothing", not as "no".
-
-        Paced on the REAL clock like every other pacing decision in the loop.
-        """
-        # Any state, not just RECOVERING: measured twice, the bot sat in ROCKET on a
-        # browser for its whole 150s timeout and never reached RECOVERING at all, so a
-        # check scoped to that state answered a question nobody was asking. The gate is
-        # instead "the map is not visible" - true of every wedge worth this call, false on
-        # the overwhelming majority of frames, so a healthy run never pays for it.
+        """Read the injected nonblocking foreground service, or confirm a visible map."""
         if on_map:
+            self.device_service.invalidate()
+            self.ctx.app_foreground = Tristate.TRUE
             return
-        if real - self._foreground_checked_at < FOREGROUND_CHECK:
-            return
-        self._foreground_checked_at = real
         try:
-            # The Actuator is the one thing that knows which device this run drives; read
-            # it defensively because the test doubles are not Actuators.
-            serial = getattr(self.actuator, "serial", None)
-            up = device.app_foreground(self.cfg.app_package, serial=serial)
+            self.ctx.app_foreground = self.device_service.read(self.cfg.app_package)
         except Exception:
-            return
-        self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
+            log.exception("foreground device query failed")
+            self.ctx.app_foreground = Tristate.UNKNOWN
 
     def _go_home(self) -> None:
         """Put the new account back on the spot the run was started from.
@@ -1258,6 +1241,8 @@ class Runner:
             elif is_actuation(e):
                 if self.actuator.apply(e, now=self.ctx.now):
                     budget = getattr(e, "budget", "tap")
+                    if budget in ("tap", "rotate"):
+                        self.ctx.last_scan_progress_ts = self.ctx.now
                     if budget == "throw":
                         self.stats.on_ball_thrown()
                         self.ctx.throws_this_encounter += 1
@@ -1275,7 +1260,7 @@ class Runner:
                         # every single time and the run still ended in Chrome. Only a check
                         # that SEES the game may say it is back, and the stamp below makes
                         # that check happen on the very next tick.
-                        self._foreground_checked_at = -1e9
+                        self.device_service.invalidate()
                     elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
                         # handler is pure and cannot know whether the actuator actually
@@ -1535,6 +1520,8 @@ class Runner:
                     self._party_false = 0
                 self.ctx.party_cannot_battle = self._party_false >= 2
 
+                if self.ctx.state is not BotState.SCANNING or not obs.on_map:
+                    self.ctx.last_scan_progress_ts = now
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                     # A confirmed map is the only evidence that a restart worked, so it is
@@ -1711,6 +1698,7 @@ class Runner:
             for closer in (getattr(self.source, "release", None),
                            getattr(self.actuator, "close", None),
                            getattr(self.keyboard, "stop", None),
+                           getattr(self.device_service, "close", None),
                            getattr(self.ledger, "close", None)):
                 if closer:
                     try:

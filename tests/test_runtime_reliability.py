@@ -1,0 +1,113 @@
+"""Public-path regressions for recovery and empty-map camera rotation."""
+from dataclasses import replace
+
+import numpy as np
+import pytest
+
+from pogobot import fsm, runner as R
+from pogobot.config import DEFAULT
+from pogobot.effects import BotState, Back, Tap, Swipe, RestartApp, Halt
+from pogobot.frames import Frame
+from pogobot.observation import Tristate
+from tests.factories import obs
+from tests.test_switch_runner import make_runner
+
+
+@pytest.mark.parametrize('spent,expected', [(0, RestartApp), (DEFAULT.max_app_restarts, Halt)])
+def test_foreign_foreground_reaches_escalation_through_dispatch(spent, expected):
+    c = fsm.Context(cfg=DEFAULT, state=BotState.RECOVERING, now=500,
+                    state_since=0, last_map_ts=0, app_foreground=Tristate.FALSE,
+                    foregrounds=DEFAULT.max_foreground_attempts, app_restarts=spent)
+    effects = fsm.step(obs(screen='Menu'), c)
+    assert any(isinstance(e, expected) for e in effects)
+    assert not any(isinstance(e, (Tap, Back, Swipe)) for e in effects)
+
+
+def test_foreign_foreground_refuses_interrupt_gestures_between_raise_attempts():
+    c = fsm.Context(cfg=DEFAULT, state=BotState.RECOVERING, now=100,
+                    state_since=99, app_foreground=Tristate.FALSE)
+    c.last_action['foreground'] = 100
+    assert not any(isinstance(e, (Back, Tap, Swipe))
+                   for e in fsm.step(obs(screen='Menu', keyboard=Tristate.TRUE), c))
+
+
+def test_empty_map_rotates_through_runner_without_aging_recovery_clock(monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr(R.time, 'perf_counter', lambda: clock[0])
+    timings = replace(DEFAULT.timings, scanning_idle_rotate=3, rotate_camera=1)
+    r = make_runner(DEFAULT.scaled(timings=timings, preflight=False, auto_rotate=True))
+    r.ctx.state = BotState.SCANNING
+
+    class Source:
+        seq = 0
+        def healthy(self):
+            return self.seq < 12
+        def read(self):
+            self.seq += 1
+            clock[0] += 1
+            return Frame(self.seq, clock[0], np.zeros((20, 20, 3), dtype=np.uint8))
+        def release(self):
+            pass
+
+    class Perceptor:
+        def observe(self, frame, **kw):
+            return obs(seq=frame.seq, ts=frame.ts)
+
+    r.source, r.perceptor = Source(), Perceptor()
+    assert r.run() == 0
+    rotations = [e for e in r.actuator.applied if isinstance(e, Swipe) and e.budget == 'rotate']
+    assert 2 <= len(rotations) <= 4
+    assert r.ctx.last_map_ts >= clock[0] - 1
+
+
+def test_blocked_foreground_query_never_blocks_the_runner_read():
+    from threading import Event
+    from time import perf_counter
+    from pogobot.device import ForegroundPoller
+
+    entered, release = Event(), Event()
+    def slow_query(*_):
+        entered.set()
+        release.wait(2)
+        return Tristate.FALSE
+
+    poller = ForegroundPoller(query=slow_query, interval=60)
+    started = perf_counter()
+    assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN
+    assert perf_counter() - started < 0.1
+    assert entered.wait(0.5)
+    release.set()
+    for _ in range(100):
+        if poller.read(DEFAULT.app_package) is Tristate.FALSE:
+            break
+        import time
+        time.sleep(0.005)
+    assert poller.read(DEFAULT.app_package) is Tristate.FALSE
+    poller.close()
+
+
+def test_failed_foreground_query_is_unknown_and_old_result_is_discarded():
+    from threading import Event
+    from pogobot.device import ForegroundPoller
+
+    release = Event()
+    poller = ForegroundPoller(query=lambda *_: (release.wait(1), Tristate.FALSE)[1],
+                              interval=60)
+    assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN
+    poller.invalidate()
+    release.set()
+    import time
+    for _ in range(100):
+        if not poller._running:
+            break
+        time.sleep(0.005)
+    assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN
+    poller.close()
+
+
+def test_replay_and_unit_default_never_query_a_device():
+    from pogobot.device import NullDeviceService
+    r = make_runner()
+    assert isinstance(r.device_service, NullDeviceService)
+    r._refresh_foreground(1.0, False)
+    assert r.ctx.app_foreground is Tristate.UNKNOWN

@@ -107,16 +107,20 @@ def test_the_handler_writes_nothing_to_the_context():
 
 
 def test_the_runner_asks_whenever_the_map_is_missing():
-    """Scoping this to RECOVERING was wrong and cost a live run: the bot sat in ROCKET on a
-    browser for the whole 150s ROCKET timeout and never reached RECOVERING, so the check
-    never ran. The gate is "no map", which is true of every wedge worth a `dumpsys` and
-    false on the overwhelming majority of frames."""
-    import inspect
+    """Every off-map state asks the injected service without doing device I/O itself."""
     from pogobot import runner as R
-    src = inspect.getsource(R.Runner._refresh_foreground)
-    assert "if on_map:" in src, "the gate should be the map, not a state"
-    assert "BotState.RECOVERING" not in src
-    assert "FOREGROUND_CHECK" in src
+    class Service:
+        def __init__(self): self.packages = []
+        def read(self, package): self.packages.append(package); return Tristate.FALSE
+        def invalidate(self): pass
+        def close(self): pass
+    service = Service()
+    r = R.Runner(DEFAULT, object(), object(), None, display=False, device_service=service)
+    for state in (BotState.ROCKET, BotState.RECOVERING, BotState.ENCOUNTER):
+        r.ctx.state = state
+        r._refresh_foreground(10.0, False)
+    assert service.packages == [DEFAULT.app_package] * 3
+    assert r.ctx.app_foreground is Tristate.FALSE
 
 
 def test_the_run_loop_actually_asks():
@@ -128,6 +132,7 @@ def test_the_run_loop_actually_asks():
     from pogobot import runner as R
     src = inspect.getsource(R.Runner.run)
     assert "self._refresh_foreground(real, obs.on_map)" in src
+    assert "device.app_foreground" not in src
 
 
 def test_an_accepted_raise_is_counted_by_the_runner():

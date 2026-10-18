@@ -71,6 +71,7 @@ class Context:
     settle_until: float = 0.0
     spun_disc: bool = False
     rotate_dir: str = "left"
+    last_scan_progress_ts: float = 0.0
     last_map_ts: float = 0.0
     last_rocket_ts: float = 0.0
     left_encounter_ts: float = 0.0
@@ -681,8 +682,9 @@ class Scanning(Handler):
                 Tap(x, y, f"target {target.name} conf={target.conf:.2f}"),
                 Transition(goto, IntentOutcome.CARRIED, f"tapped {target.name}"),
             ]
-        if cfg.auto_rotate and ctx.ready("rotate", cfg.timings.rotate_camera) \
-                and ctx.now - ctx.last_map_ts >= cfg.timings.scanning_idle_rotate:
+        if (cfg.auto_rotate and ctx.ready("rotate", cfg.timings.rotate_camera)
+                and ctx.now - max(ctx.last_scan_progress_ts, ctx.state_since)
+                >= cfg.timings.scanning_idle_rotate):
             y = 0.58
             x1, x2 = (0.58, 0.42) if ctx.rotate_dir == "left" else (0.42, 0.58)
             return [
@@ -2114,6 +2116,8 @@ def interrupts(obs: Observation, ctx: Context) -> list[Effect]:
             ForegroundApp(cfg.app_package, cfg.app_activity,
                           "bring the game back to the front"),
         ]
+    if ctx.app_foreground is Tristate.FALSE:
+        return []
     if obs.exit_dialog.value and ctx.ready("back", cfg.timings.exit_dialog_back):
         return [Back("dismiss Pokemon GO's own exit-confirmation dialog"),
                 Note("exit-confirmation dialog detected; pressing BACK rather than "
@@ -2251,6 +2255,10 @@ def desired_state(obs: Observation, ctx: Context) -> Optional[BotState]:
 
 def step(obs: Observation, ctx: Context) -> list[Effect]:
     """One tick. Pure - returns what should happen, does not make it happen."""
+    if ctx.state is BotState.HALTED:
+        return []
+    if not obs.on_map and Recovering._restarting(ctx):
+        return []
     fired = interrupts(obs, ctx)
     if fired:
         return fired
@@ -2274,6 +2282,9 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
         if ctx.state is not BotState.RECOVERING:
             return [Transition(BotState.RECOVERING, IntentOutcome.CARRIED,
                                "another app is in front of the game")]
+        handler = HANDLERS[BotState.RECOVERING]
+        if ctx.elapsed > handler.timeout(ctx):
+            return handler.on_timeout(obs, ctx)
         return []
 
     want = desired_state(obs, ctx)

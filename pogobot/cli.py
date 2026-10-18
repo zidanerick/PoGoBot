@@ -395,10 +395,11 @@ def main(argv=None) -> int:
     from .actions import Actuator, NullActuator
     from .stats import SessionStats
     from .capture import ReplaySource, ScrcpySource
-    from .device import KeyboardPoller, device_online, ensure_app_running, screen_size
+    from .device import (ForegroundPoller, KeyboardPoller, NullDeviceService,
+                         device_online, ensure_app_running, screen_size)
     from .learning import IntentLedger
     from .perception import Perceptor
-    from .runner import Runner
+    from .runner import FOREGROUND_CHECK, Runner
 
     # A locally trained larger detector wins if one is present. Only the compact model
     # is committed; an 85 MB weight file is not something every clone should download.
@@ -431,6 +432,7 @@ def main(argv=None) -> int:
         source = ReplaySource(a.replay, interval=a.replay_interval)
         actuator = NullActuator()
         keyboard = None
+        device_service = NullDeviceService()
         screen_wh = (1080, 2340)
         log.info("REPLAY mode: %s (no device will be touched)", a.replay)
     else:
@@ -445,6 +447,7 @@ def main(argv=None) -> int:
         source = ScrcpySource(cfg, serial=a.serial)
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
         keyboard = KeyboardPoller(serial=a.serial).start()
+        device_service = ForegroundPoller(serial=a.serial, interval=FOREGROUND_CHECK)
 
         from .accounts import UiTreeReader
         tree_reader, account, roster = prepare_accounts(
@@ -524,7 +527,7 @@ def main(argv=None) -> int:
                     dialogue_dump=a.collect_dialogues,
                     quota=quota, pause_file=a.pause_file, tree_reader=tree_reader,
                     roster=roster, account_profiles=account_profiles,
-                    notifier=notifier)
+                    notifier=notifier, device_service=device_service)
     if dashboard is None:
         # No dashboard means Runner kept the SessionStats it built itself; name it here
         # so the very first session's spins are booked under the identified account rather
