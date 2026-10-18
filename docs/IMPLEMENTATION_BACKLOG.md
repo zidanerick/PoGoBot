@@ -173,23 +173,39 @@ class Provider(Protocol):
     def capabilities(self, now: float) -> tuple[Capability, ...]: ...
 
 @dataclass(frozen=True)
-class TouchPoint:
+class Sample:
     t_ms: int
     x: float
     y: float
 
 @dataclass(frozen=True)
-class TouchTrajectory:
-    points: tuple[TouchPoint, ...]
-    profile_id: str
+class Trajectory:
+    samples: tuple[Sample, ...]
     seed: int
+
+@dataclass(frozen=True)
+class Calibration:
+    screen_wh: tuple[int, int]
+    scale_x: float = 1.0
+    scale_y: float = 1.0
+    offset_x: float = 0.0
+    offset_y: float = 0.0
+
+class PointerSink(Protocol):
+    def down(self, x: int, y: int) -> None: ...
+    def move(self, x: int, y: int) -> None: ...
+    def release(self, x: int, y: int, *, cancelled: bool) -> None: ...
+
+class GestureExecutor:
+    def execute(self, trajectory: Trajectory, calibration: Calibration,
+                cancel: Event, *, screen_wh: tuple[int, int] | None = None) -> Execution: ...
 ```
 
 Initial provider capabilities: `auto_spin`, `auto_battle`, `autowalk`. Distinguish provider support from enabled state; require fresh positive support and enabled evidence before relying on assisted behavior. Unknown blocks that dependent feature and produces a reason. A standard-client adapter declares unsupported provider features and can still use implemented manual touch actions. Capability snapshots are read-only inputs in Context; providers never actuate from `capabilities()`.
 
-TouchTrajectory lives in contracts.py. New `TraceGesture(trajectory, reason, budget="throw")` lives in effects.py; add it to ACTUATIONS only when a backend implements it. Coordinates are finite normalized fractions in [0,1], origin top-left. Points require at least two entries, first t_ms=0, subsequent times strictly increase, and a validated maximum duration/sample count. Backend emits one continuous down/move/up contact, releases on normal completion, and attempts release in failure/cancellation cleanup. No sequence of independent swipes qualifies. Convert to logical device pixels once in the backend, using a validated viewport/orientation profile; invalidate the profile on geometry change. Unsupported trajectories return an explicit rejection; straight Swipe remains available where the caller explicitly selects a supported fallback.
+`Trajectory` and `Calibration` live in `pogobot.gestures`; they are pure data and the calibration is separate from the planned capture-normalized path. `PointerSink` and `GestureExecutor` define opt-in continuous-pointer execution. Keep this executor disconnected from gameplay until it is routed through the action lifecycle. Then add `TraceGesture(trajectory, reason, budget="throw")` to effects.py and ACTUATIONS only after its backend is integrated and validated. Coordinates are finite normalized fractions in [0,1], origin top-left. Samples require at least two entries, first t_ms=0, subsequent times strictly increase, and a validated maximum duration/sample count. Backend emits one continuous down/move/release contact, releases on normal completion, and attempts release in failure/cancellation cleanup. No sequence of independent swipes qualifies. Convert to logical device pixels once using Calibration and reject stale viewport geometry. Unsupported trajectories return an explicit rejection; straight Swipe remains available where the caller explicitly selects a supported fallback.
 
-Pure planner API in gestures.py: `plan_straight(start, end, duration_ms, profile_id, seed) -> TouchTrajectory`. Calibration profiles record device/viewport identity, backend/version, latency observations, usable origin/target areas and validation date. Seeded variation must stay within the measured usable area and never compensate for uncertain perception. Keep queue delay, transport delay and on-device gesture duration separate in logs. Curve planning and performance claims wait for backend validation. Smooth motion is a quality objective; it provides no basis for a reduced-ban-risk claim.
+Pure planner API in gestures.py: `plan_straight(start, end, *, duration_ms, interval_ms, safe_area, target_area, variation, seed, max_velocity) -> Trajectory`. Calibration fits per-axis scale and offset from measured normalized anchors and stores logical display size; recalibrate after geometry changes. Seeded variation stays inside the supplied target and safe rectangles and never compensates for uncertain perception. Keep queue delay, transport delay and on-device gesture duration separate in logs. The executor requires a bounded, synchronous PointerSink; timeout or release failure remains visible and execution is uncertain. Curve planning and performance claims wait for backend validation. Smooth motion is a quality objective; it provides no basis for a reduced-ban-risk claim.
 
 ### 6. Event schema and migration
 
