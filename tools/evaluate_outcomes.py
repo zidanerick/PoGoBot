@@ -18,8 +18,11 @@ def load_episode_manifest(path: Path) -> dict:
     predictor = doc.get("predictor")
     if not isinstance(predictor, dict) or not all(
             isinstance(predictor.get(k), str) and predictor[k].strip()
-            for k in ("name", "version")):
-        raise ValueError("predictor name and version are required")
+            for k in ("name", "version", "artifact_sha256")):
+        raise ValueError("predictor name, version and artifact_sha256 are required")
+    artifact_hash = predictor["artifact_sha256"]
+    if len(artifact_hash) != 64 or any(c not in "0123456789abcdef" for c in artifact_hash):
+        raise ValueError("predictor artifact_sha256 must be 64 lowercase hexadecimal characters")
     episodes = doc.get("episodes")
     if not isinstance(episodes, list) or not episodes:
         raise ValueError("manifest must contain episodes")

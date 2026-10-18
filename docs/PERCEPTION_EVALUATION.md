@@ -56,12 +56,12 @@ python tools/promote_reviewed.py --promote --manifest datasets/reviewed/manifest
 
 ## Outcome labels and metrics
 
-Outcome scoring uses one row per completed interaction/action ID, not one row per video frame. Annotate `caught`, `fled`, `broke_out`, `still_in_encounter`, `out_of_balls`, or `unknown`. Truth requires a reviewer and an evidence reference to the relevant frame sequence. Predictions come from the bot trace at the time it would act. `unknown` is an explicit abstention; it is never silently scored as success. `tools/evaluate_outcomes.py` validates and scores a hash-bound episode manifest. The pure `evaluate_outcomes` function returns episode count, recording count, coverage, accuracy among covered predictions, accuracy over all episodes, abstentions and a confusion matrix. The manifest requires a predictor name/version, reviewer, evidence image paths and hashes, action IDs, and one split per recording. Split by recording before analysis. Predictions can be exported from a candidate result classifier; this tool scores them but does not train or run a result classifier.
+Outcome scoring uses one row per completed interaction/action ID, not one row per video frame. Annotate `caught`, `fled`, `broke_out`, `still_in_encounter`, `out_of_balls`, or `unknown`. Truth requires a reviewer and an evidence reference to the relevant frame sequence. Predictions come from the bot trace at the time it would act. `unknown` is an explicit abstention; it is never silently scored as success. `tools/evaluate_outcomes.py` validates and scores a hash-bound episode manifest. The pure `evaluate_outcomes` function returns episode count, recording count, coverage, accuracy among covered predictions, accuracy over all episodes, abstentions and a confusion matrix. The manifest requires a predictor name/version and SHA-256 artifact hash, reviewer, evidence image paths and hashes, action IDs, and one split per recording. Hash the checkpoint or the versioned rule package used to produce predictions. Split by recording before analysis. Predictions can be exported from a candidate result classifier; this tool scores them but does not train or run a result classifier.
 
 ```json
 {
   "schema_version": 1,
-  "predictor": {"name": "screen-state", "version": "candidate-1"},
+  "predictor": {"name": "screen-state", "version": "candidate-1", "artifact_sha256": "<64 lowercase hex characters>"},
   "episodes": [{
     "action_id": "encounter-0001",
     "recording_id": "walk-2026-10-18-001",

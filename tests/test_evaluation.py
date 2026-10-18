@@ -120,7 +120,7 @@ def make_outcome_manifest(root: Path, *, split="validation"):
     frame = root / "result.png"
     frame.write_bytes(b"result frame")
     import hashlib
-    doc = {"schema_version": 1, "predictor": {"name": "screen-state", "version": "candidate-1"},
+    doc = {"schema_version": 1, "predictor": {"name": "screen-state", "version": "candidate-1", "artifact_sha256": "a" * 64},
            "episodes": [{"action_id": "enc-1", "recording_id": "session-1", "split": split,
                          "truth": "caught", "prediction": "caught", "reviewed": True,
                          "reviewer": "r", "evidence": [{"path": "result.png",
