@@ -23,6 +23,7 @@ cannot recur.
 from __future__ import annotations
 
 import queue
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -34,6 +35,7 @@ from typing import Deque, Mapping, Optional, Sequence
 
 from .effects import (Back, DoubleTapDrag, Effect, ForegroundApp, Pinch, RestartApp,
                       Swipe, Tap, is_actuation)
+from .gestures import Calibration, Trajectory
 from .observation import Tristate
 
 DEFAULT_RESOLUTION = (1080, 2340)
@@ -49,6 +51,8 @@ _BENIGN_STDERR = re.compile(r"Activity not started, intent has been delivered")
 #: for the same reason.
 _PINCH_REMOTE = "/data/local/tmp/pogobot-pinch.dex"
 _PINCH_LOCAL = Path(__file__).resolve().parent / "vendor" / "pinch.dex"
+_GESTURE_REMOTE = "/data/local/tmp/pogobot-gesture.dex"
+_GESTURE_LOCAL = Path(__file__).resolve().parent / "vendor" / "gesture.dex"
 
 MIN_INTERVAL = 0.25
 """Per-budget floor, in seconds. This is a safety net, not the schedule: the intended
@@ -87,6 +91,169 @@ class Command:
 
     def __str__(self) -> str:
         return f"{' '.join(self.argv)}  # {self.reason}"
+
+
+@dataclass(frozen=True)
+class GestureReceipt:
+    """Android injector receipt. It confirms injected events, never a game outcome."""
+    status: str
+    host_delay_ms: float
+    contact_ms: float
+    device_start_ms: Optional[int]
+    device_end_ms: Optional[int]
+
+
+class ADBGestureTransport:
+    """Send one timed, cancellable, single-pointer trajectory to the Android injector.
+
+    This transport is deliberately separate from Actuator's effect queue until the shared
+    runner/action cancellation contract is finalized. Call execute from a worker, share its
+    cancellation Event with pause/recovery, and never wait for it in the frame loop.
+    """
+    def __init__(self, screen_wh: tuple[int, int], adb: str = "adb",
+                 serial: Optional[str] = None, timeout: float = ADB_TIMEOUT):
+        w, h = (int(screen_wh[0]), int(screen_wh[1]))
+        if w < 2 or h < 2:
+            raise ValueError("screen_wh must contain dimensions >= 2")
+        self.screen_wh = (w, h)
+        self.adb, self.serial, self.timeout = adb, serial, timeout
+        self._pushed = False
+        self._lock = threading.Lock()
+
+    def _ensure_injector(self) -> None:
+        if self._pushed:
+            return
+        if not _GESTURE_LOCAL.is_file():
+            raise FileNotFoundError(
+                f"gesture injector is not built: {_GESTURE_LOCAL}; "
+                "see tools/gesture/README.md")
+        result = subprocess.run(
+            _adb_argv(self.adb, self.serial, "push", str(_GESTURE_LOCAL), _GESTURE_REMOTE),
+            capture_output=True, timeout=self.timeout, check=False)
+        if result.returncode != 0 or result.stderr.strip():
+            raise RuntimeError("could not push gesture injector: " +
+                               result.stderr.decode(errors="replace").strip())
+        self._pushed = True
+
+    def execute(self, trajectory: Trajectory, calibration: Calibration,
+                cancel: threading.Event, *, submitted_at: Optional[float] = None,
+                screen_wh: Optional[tuple[int, int]] = None) -> GestureReceipt:
+        if calibration.screen_wh != self.screen_wh:
+            raise ValueError("calibration display size differs from transport display")
+        if screen_wh is not None and tuple(screen_wh) != self.screen_wh:
+            raise ValueError("logical display changed; recalibration required")
+        plan = trajectory.wire_command(calibration)
+        if submitted_at is not None and not math.isfinite(submitted_at):
+            raise ValueError("submitted_at must be finite")
+        if cancel.is_set():
+            return GestureReceipt("cancelled", 0.0, 0.0, None, None)
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("a gesture is already executing")
+        try:
+            return self._run_plan(plan, trajectory.duration_ms, cancel, submitted_at)
+        finally:
+            self._lock.release()
+
+    def _run_plan(self, plan, duration_ms, cancel, submitted_at):
+        self._ensure_injector()
+        argv = _adb_argv(self.adb, self.serial, "shell",
+                         f"CLASSPATH={_GESTURE_REMOTE} app_process / pogobot.Gesture --stdio")
+        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+        lines: "queue.Queue[str]" = queue.Queue()
+        def read_output():
+            try:
+                for line in proc.stdout:
+                    lines.put(line.strip())
+            finally:
+                lines.put("__EOF__")
+        threading.Thread(target=read_output, name="gesture-android-output",
+                         daemon=True).start()
+        started_at = time.perf_counter()
+        gesture_started_host = None
+        device_start = device_end = None
+        cancel_sent = False
+        terminal = None
+        recent = deque(maxlen=8)
+        try:
+            ready_deadline = started_at + self.timeout
+            while time.perf_counter() < ready_deadline:
+                if cancel.is_set():
+                    return GestureReceipt("cancelled", 0.0, 0.0, None, None)
+                try:
+                    line = lines.get(timeout=min(.05, max(0, ready_deadline - time.perf_counter())))
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                recent.append(line)
+                if line == "READY":
+                    break
+            else:
+                raise TimeoutError("gesture injector startup timed out")
+            if not recent or recent[-1] != "READY":
+                raise RuntimeError("gesture injector did not become ready: " + " | ".join(recent))
+            proc.stdin.write(plan + "\n")
+            proc.stdin.flush()
+            deadline = time.perf_counter() + self.timeout + duration_ms / 1000 + 1.0
+            while time.perf_counter() < deadline:
+                if cancel.is_set() and not cancel_sent:
+                    cancel_sent = True
+                    try:
+                        proc.stdin.write("CANCEL\n")
+                        proc.stdin.flush()
+                    except (BrokenPipeError, OSError):
+                        # The device may have finished and closed its pipe immediately
+                        # before this cancellation check. A buffered DONE receipt below
+                        # determines whether the completed gesture needs classification.
+                        pass
+                try:
+                    line = lines.get(timeout=.02)
+                except queue.Empty:
+                    if proc.poll() is not None:
+                        break
+                    continue
+                recent.append(line)
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "START":
+                    device_start = int(parts[1])
+                    gesture_started_host = time.perf_counter()
+                elif len(parts) == 2 and parts[0] in ("DONE", "CANCELLED"):
+                    terminal, device_end = parts[0], int(parts[1])
+                    break
+                elif line.startswith("ERROR "):
+                    raise RuntimeError(line)
+            if terminal is None:
+                raise TimeoutError("gesture injector did not return a terminal receipt: " +
+                                   " | ".join(recent))
+            proc.wait(timeout=1.0)
+            if proc.returncode != 0:
+                raise RuntimeError(f"gesture injector exited with status {proc.returncode}")
+            # START is printed after Android acknowledges ACTION_DOWN, so this measures
+            # caller submission through queueing, adb startup and the first injection.
+            host_delay = (0.0 if gesture_started_host is None else
+                          max(0.0, (gesture_started_host -
+                                    (submitted_at if submitted_at is not None else started_at)) * 1000))
+            contact = (0.0 if device_start is None or device_end is None else
+                       max(0.0, float(device_end - device_start)))
+            return GestureReceipt("cancelled" if terminal == "CANCELLED" else "executed",
+                                  host_delay, contact, device_start, device_end)
+        finally:
+            if proc.poll() is None:
+                try:
+                    proc.stdin.write("CANCEL\n")
+                    proc.stdin.flush()
+                    proc.wait(timeout=.5)
+                except Exception:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=.5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait(timeout=.5)
+            for stream in (proc.stdin, proc.stdout):
+                if stream is not None:
+                    stream.close()
 
 
 @dataclass
