@@ -125,6 +125,14 @@ class Trajectory:
                 "samples": [dict(asdict(s), device_xy=calibration.pixels(s.x, s.y))
                             for s in self.samples]}
 
+    def wire_command(self, calibration: Calibration) -> str:
+        """Encode one bounded plan for the Android gesture process stdin protocol."""
+        samples = []
+        for sample in self.samples:
+            x, y = calibration.pixels(sample.x, sample.y)
+            samples.append(f"{sample.t_ms},{x},{y}")
+        return "PLAN " + ";".join(samples)
+
 
 def plan_straight(start: tuple[float, float], end: tuple[float, float], *,
                   duration_ms: int = 200, interval_ms: int = 8,
