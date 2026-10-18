@@ -164,3 +164,50 @@ def test_outcome_cli_writes_machine_readable_metrics(tmp_path):
     assert report["episodes"] == 1
     assert report["covered_accuracy"] == 1.0
     assert report["predictor"]["version"] == "candidate-1"
+
+
+def test_evidence_sampling_is_bounded_and_rejects_invalid_csv(tmp_path):
+    from tools.extract_outcome_evidence import parse_events, sample_times
+
+    actions = tmp_path / "actions.csv"
+    actions.write_text("action_id,timestamp_s\nthrow-1,5.0\n")
+    events = parse_events(actions)
+    samples = sample_times(events, before=2, after=3, interval=1, max_frames=8)
+    assert samples["throw-1"] == [3, 4, 5, 6, 7, 8]
+    with pytest.raises(ValueError, match="above --max-frames"):
+        sample_times(events, before=2, after=12, interval=.5, max_frames=10)
+    actions.write_text("wrong,header\n")
+    with pytest.raises(ValueError, match="action_id,timestamp_s"):
+        parse_events(actions)
+
+
+def test_video_extractor_writes_hashed_unreviewed_frames_without_cv2_install(tmp_path, monkeypatch):
+    import hashlib
+    import sys
+    import types
+    from tools.extract_outcome_evidence import extract
+
+    class FakeCapture:
+        def __init__(self, path): self.ts = 0; self.released = False
+        def isOpened(self): return True
+        def set(self, prop, value): self.ts = value; return True
+        def read(self): return True, self.ts
+        def release(self): self.released = True
+
+    def fake_imwrite(path, frame, options):
+        Path(path).write_bytes(str(frame).encode())
+        return True
+
+    fake = types.SimpleNamespace(VideoCapture=FakeCapture, CAP_PROP_POS_MSEC=0,
+                                 IMWRITE_JPEG_QUALITY=1, imwrite=fake_imwrite)
+    monkeypatch.setitem(sys.modules, "cv2", fake)
+    out = tmp_path / "session.json"
+    doc = extract(tmp_path / "fake.mp4", [{"action_id": "a/1", "timestamp_s": 3.0}], out,
+                  recording_id="session-a", split="train", before=1, after=1,
+                  interval=1, max_frames=5)
+    episode = doc["episodes"][0]
+    assert episode["reviewed"] is False and episode["truth"] == "unknown"
+    assert len(episode["evidence"]) == 3
+    for item in episode["evidence"]:
+        frame = tmp_path / item["path"]
+        assert hashlib.sha256(frame.read_bytes()).hexdigest() == item["sha256"]

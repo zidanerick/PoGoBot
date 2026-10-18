@@ -79,6 +79,26 @@ Run it with `python tools/evaluate_outcomes.py --manifest datasets/outcomes/mani
 
 Use separate measurements for screen classification, target detection, game outcome and action quality. For a supervised run, link each outcome episode to action ID and report: readiness/launch precision, breakout/catch/flee confusion, unknown rate, false taps on negative screens, successful launches per requested throw, balls per confirmed catch, observed stop rewards, and active-device latency. A UI appearing is not proof an item was awarded. If the available pixels cannot distinguish a catch from a flee, keep the label unknown and gather more evidence.
 
+## Preparing encounter recordings
+
+`tools/extract_outcome_evidence.py` samples bounded evidence windows from a local screen recording. Supply a CSV with one row per throw/action and its timestamp in seconds from the start of the recording. Use a recording ID and split consistently for all events from that recording:
+
+```csv
+action_id,timestamp_s
+enc-0001-throw-01,42.5
+enc-0001-throw-02,61.0
+```
+
+```sh
+python tools/extract_outcome_evidence.py \
+  --video recordings/session-01.mp4 \
+  --actions recordings/session-01-actions.csv \
+  --recording-id session-01 --split train \
+  --output datasets/outcomes/session-01.json
+```
+
+The defaults save frames from two seconds before through twelve seconds after each action at one-second intervals, with a 64-frame per-action limit. Adjust the window to match the event; keep adjacent events from the same recording in one split. The tool does not infer outcomes. It writes `unknown` labels with `reviewed: false`, so its output must be reviewed and completed before scoring. Keep recordings and generated screenshots local unless you have checked them for account names, location details and other private screen content.
+
 ## Current data limitation
 
 At this checkout, `datasets/det_v3/valid` referenced by the previous evaluator and README is not tracked. The golden screen tests also skip when their labelled corpus is absent. No outcome examples are available to calculate real accuracy yet. The first data task is a small, consented capture set with complete outcome evidence and recording-level splits, including negatives and ambiguous transitions. Until then, the evaluator's output remains unavailable rather than fabricated.
