@@ -112,3 +112,55 @@ def test_promotion_copies_only_approved_training_data_and_records_provenance(tmp
 def test_promotion_refuses_held_out_sample(tmp_path):
     path, _, _, _ = make_manifest(tmp_path / "source", split="test")
     assert cmd_promote(tmp_path / "dest", True, path) == 2
+
+
+def make_outcome_manifest(root: Path, *, split="validation"):
+    from tools.evaluate_outcomes import load_episode_manifest
+    root.mkdir(parents=True)
+    frame = root / "result.png"
+    frame.write_bytes(b"result frame")
+    import hashlib
+    doc = {"schema_version": 1, "predictor": {"name": "screen-state", "version": "candidate-1"},
+           "episodes": [{"action_id": "enc-1", "recording_id": "session-1", "split": split,
+                         "truth": "caught", "prediction": "caught", "reviewed": True,
+                         "reviewer": "r", "evidence": [{"path": "result.png",
+                         "sha256": hashlib.sha256(frame.read_bytes()).hexdigest()}]}]}
+    path = root / "outcomes.json"
+    path.write_text(json.dumps(doc))
+    return path, doc, frame, load_episode_manifest
+
+
+def test_outcome_manifest_binds_predictions_to_reviewed_evidence_and_recording_split(tmp_path):
+    path, doc, frame, load_manifest = make_outcome_manifest(tmp_path / "episodes")
+    assert load_manifest(path)["episodes"]
+    frame.write_bytes(b"different frame")
+    with pytest.raises(ValueError, match="changed since review"):
+        load_manifest(path)
+    frame.write_bytes(b"result frame")
+    doc["episodes"].append(dict(doc["episodes"][0], action_id="enc-2", split="test"))
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="split leakage"):
+        load_manifest(path)
+
+
+def test_outcome_manifest_requires_predictor_and_review(tmp_path):
+    path, doc, _, load_manifest = make_outcome_manifest(tmp_path / "episodes")
+    doc["episodes"][0]["reviewed"] = False
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="human outcome review"):
+        load_manifest(path)
+
+
+def test_outcome_cli_writes_machine_readable_metrics(tmp_path):
+    import subprocess
+    import sys
+
+    path, _, _, _ = make_outcome_manifest(tmp_path / "episodes")
+    output = tmp_path / "metrics.json"
+    result = subprocess.run([sys.executable, "tools/evaluate_outcomes.py", "--manifest", str(path),
+                            "--output", str(output)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    report = json.loads(output.read_text())
+    assert report["episodes"] == 1
+    assert report["covered_accuracy"] == 1.0
+    assert report["predictor"]["version"] == "candidate-1"
