@@ -167,4 +167,3 @@ def test_android_wire_plan_is_a_single_timed_single_pointer_batch():
     assert wire.startswith("PLAN 0,10,159;")
     assert wire.endswith("120,89,40")
     assert len(wire[5:].split(";")) == 3
-
