@@ -163,6 +163,7 @@ class Runner:
         self.pause_file = pause_file
         self.tree_reader = tree_reader
         self._tree_query_active = False
+        self._home_navigation = None
         # The accounts that exist, enumerated once at startup with the panel open. It is
         # not refreshed because it cannot be: outside a switch the panel is shut and the
         # tree lists no rows at all, so a live read would only ever shrink this to nothing.
@@ -641,10 +642,21 @@ class Runner:
         if not home:
             return
         try:
+            if hasattr(self.tree_reader, "request") and hasattr(self.tree_reader, "poll"):
+                # The live CLI uses AsyncUiTreeReader. Drive its reads over later runner
+                # ticks so a home lookup can never stall perception or input handling.
+                from .accounts import AsyncHomeNavigator
+                self._home_navigation = AsyncHomeNavigator(
+                    self.tree_reader, self.actuator, home)
+                return
             from .accounts import teleport_home
             went = teleport_home(self.tree_reader, self.actuator, home)
-        except Exception:
+        except Exception as exc:
             log.exception("could not return to %r", home)
+            self.notifier.problem(
+                "Could not return home",
+                f"Home-favorite navigation raised {type(exc).__name__}: {exc} "
+                f"after switching to {self.stats.account or 'an unnamed account'}.")
             return
         if went:
             log.info("back at %s", went)
@@ -653,6 +665,30 @@ class Runner:
                                   f"No PGSharp saved location matching {home!r} was "
                                   f"tapped after switching to "
                                   f"{self.stats.account or 'an unnamed account'}.")
+
+    def _poll_home_navigation(self) -> None:
+        """Advance asynchronous account-switch home navigation without waiting."""
+        navigation = self._home_navigation
+        if navigation is None:
+            return
+        try:
+            completed = navigation.advance()
+        except Exception as exc:
+            log.exception("could not return home asynchronously")
+            navigation.failure = str(exc) or type(exc).__name__
+            navigation.finished = True
+            completed = False
+        if completed is None:
+            return
+        self._home_navigation = None
+        if completed:
+            log.info("back at %s", navigation.result)
+            return
+        detail = navigation.failure or "The home-favorite navigation did not complete."
+        self.notifier.problem(
+            "Could not return home",
+            f"{detail} after switching to "
+            f"{self.stats.account or 'an unnamed account'}.")
 
     def _maybe_heartbeat(self, now: float) -> None:
         """Post routine progress to Discord on a timer.
@@ -1614,6 +1650,7 @@ class Runner:
                 self._apply_account_profile()
                 self._refresh_foreground(real, obs.on_map)
                 self._refresh_accounts(real)
+                self._poll_home_navigation()
                 self._maybe_preflight(obs)
                 self._maybe_switch(obs)
                 self._update_restock()

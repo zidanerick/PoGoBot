@@ -291,6 +291,93 @@ def test_a_failed_go_home_is_reported_but_does_not_raise():
     assert rec.problems == ["Could not return home"]
 
 
+def test_account_switch_with_async_reader_returns_to_configured_home():
+    """The production CLI wraps this reader, so a confirmed switch must not call read()."""
+    from dataclasses import replace
+    from time import monotonic, sleep
+    from pogobot.accounts import AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+
+    class _Rec:
+        enabled = False
+
+        def __init__(self):
+            self.problems = []
+
+        def problem(self, title, detail=""):
+            self.problems.append((title, detail))
+
+        def started(self, **k): pass
+        def finished(self, **k): pass
+        def halted(self, *a, **k): pass
+        def switched(self, n): pass
+        def close(self, timeout=5.0): pass
+
+    rec = _Rec()
+    reader = AsyncUiTreeReader(_Reader(
+        "pgsharp_shortcut_menu", "pgsharp_favorites", "pgsharp_favorites",
+        "pgsharp_shortcut_menu"))
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader, notifier=rec)
+    r.actuator = _Act()
+    started = monotonic()
+    r._on_switch_confirmed("Traveller")
+    assert monotonic() - started < 0.1
+    assert r._home_navigation is not None
+    # Skip UI settling in this deterministic fixture; production uses the 1.2s deadline.
+    r._home_navigation.settle = 0
+
+    deadline = monotonic() + 2
+    while r._home_navigation is not None and monotonic() < deadline:
+        r._poll_home_navigation()
+        sleep(0.002)
+
+    assert r._home_navigation is None
+    assert any(reason == "home: teleport to Home Location"
+               for _, _, reason in r.actuator.taps)
+    assert rec.problems == []
+    reader.close()
+
+
+def test_async_home_navigation_failure_reaches_notifier():
+    from dataclasses import replace
+    from time import monotonic, sleep
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+
+    class _Rec:
+        enabled = False
+
+        def __init__(self):
+            self.problems = []
+
+        def problem(self, title, detail=""):
+            self.problems.append((title, detail))
+
+        def started(self, **k): pass
+        def finished(self, **k): pass
+        def halted(self, *a, **k): pass
+        def switched(self, n): pass
+        def close(self, timeout=5.0): pass
+
+    rec = _Rec()
+    reader = AsyncUiTreeReader(accounts.FakeTreeReader(
+        [AccountView(available=False)]))
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader, notifier=rec)
+    r._on_switch_confirmed("Traveller")
+    deadline = monotonic() + 2
+    while r._home_navigation is not None and monotonic() < deadline:
+        r._poll_home_navigation()
+        sleep(0.002)
+
+    assert r._home_navigation is None
+    assert len(rec.problems) == 1
+    assert rec.problems[0][0] == "Could not return home"
+    assert "Could not read" in rec.problems[0][1]
+    reader.close()
+
+
 def test_a_ladder_that_throws_cannot_break_the_switch():
     from dataclasses import replace
     from pogobot.config import DEFAULT

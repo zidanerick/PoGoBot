@@ -723,6 +723,160 @@ def teleport_home(tree_reader: "UiTreeReader", actuator, home: str,
     return match.name
 
 
+class AsyncHomeNavigator:
+    """Drive the home-favourite ladder from a nonblocking tree reader.
+
+    ``advance`` is called by the runner once per tick. It never waits or sleeps: tree
+    reads are requested through ``AsyncUiTreeReader``, and each tap is followed by a
+    monotonic settle deadline before another read is requested. The complete navigation
+    has a finite deadline so a dead reader cannot leave it pending forever.
+    """
+
+    TOTAL_TIMEOUT = 30.0
+
+    def __init__(self, tree_reader, actuator, home: str, settle: float = 1.2):
+        self.tree_reader = tree_reader
+        self.actuator = actuator
+        self.home = home.strip()
+        self.settle = max(0.0, float(settle))
+        self.started = time.monotonic()
+        self.ready_at = self.started
+        self.phase = "initial"
+        self.waiting_for_view = True
+        self.finished = False
+        self.result: Optional[str] = None
+        self.failure: Optional[str] = None
+        self._jump_name: Optional[str] = None
+        self.tree_reader.invalidate()
+        self.tree_reader.request()
+
+    def _tap_and_wait(self, x: float, y: float, reason: str, phase: str) -> None:
+        accepted = self.actuator.apply(Tap(x, y, reason, budget=HOME_BUDGET))
+        if accepted is False:
+            self.failure = f"Could not dispatch {reason}"
+            self.finished = True
+            return
+        self.tree_reader.invalidate()
+        self.phase = phase
+        self.waiting_for_view = False
+        self.ready_at = time.monotonic() + self.settle
+
+    def _fail(self, reason: str, view: Optional[AccountView] = None) -> None:
+        self.failure = reason
+        self.finished = True
+        log.warning("home-favorite navigation failed: %s", reason)
+        # Preserve teleport_home's cleanup rule: a failed lookup must not leave the
+        # Favorites page or shortcut menu covering the game. Use only controls from the
+        # just-consumed tree, and keep each cleanup tap on the runner thread.
+        if view is not None and view.available and view.close_norm is not None:
+            self.finished = False
+            self._tap_and_wait(*view.close_norm, "home: close the PGSharp page",
+                               "failure_cleanup")
+        elif (view is not None and view.available
+              and view.favorites_menu_norm is not None and view.star_norm is not None):
+            self.finished = False
+            self._tap_and_wait(*view.star_norm,
+                               "home: close the PGSharp shortcut menu", "failure_complete")
+
+    def _select_home(self, view: AccountView) -> None:
+        wanted = self.home.casefold()
+        match = next((row for row in view.favorites
+                      if row.name.strip().casefold() == wanted), None)
+        if match is None:
+            match = next((row for row in view.favorites
+                          if wanted and wanted in row.name.casefold()), None)
+        if match is None:
+            found = ", ".join(row.name for row in view.favorites) or "none"
+            self._fail(f"No saved location matching {self.home!r} (found: {found})",
+                       view)
+            return
+        self._jump_name = match.name
+        self._tap_and_wait(*match.tap_norm, f"home: teleport to {match.name}",
+                           "after_jump")
+
+    def _consume(self, view: AccountView) -> None:
+        if self.phase == "initial":
+            if not view.available:
+                self._fail("Could not read the PGSharp overlay")
+            elif view.favorites_open:
+                self._select_home(view)
+            elif view.favorites_menu_norm is not None:
+                self._tap_and_wait(*view.favorites_menu_norm,
+                                   "home: open PGSharp Favorites", "favorites")
+            elif view.star_norm is not None:
+                self._tap_and_wait(*view.star_norm,
+                                   "home: open the PGSharp shortcut menu", "menu")
+            else:
+                self._fail("PGSharp's star is not on screen", view)
+        elif self.phase == "menu":
+            if view.available and view.favorites_menu_norm is not None:
+                self._tap_and_wait(*view.favorites_menu_norm,
+                                   "home: open PGSharp Favorites", "favorites")
+            else:
+                self._fail("The PGSharp shortcut menu did not open", view)
+        elif self.phase == "favorites":
+            if view.available and view.favorites_open:
+                self._select_home(view)
+            else:
+                self._fail("PGSharp's Favorites page did not open", view)
+        elif self.phase == "after_jump":
+            if view.available and view.close_norm is not None:
+                self._tap_and_wait(*view.close_norm, "home: close the PGSharp page",
+                                   "after_page_close")
+            elif view.available and view.favorites_menu_norm is not None \
+                    and view.star_norm is not None:
+                self._tap_and_wait(*view.star_norm,
+                                   "home: close the PGSharp shortcut menu", "complete")
+            else:
+                self.result = self._jump_name
+                self.finished = True
+        elif self.phase == "after_page_close":
+            if view.available and view.favorites_menu_norm is not None \
+                    and view.star_norm is not None:
+                self._tap_and_wait(*view.star_norm,
+                                   "home: close the PGSharp shortcut menu", "complete")
+            else:
+                self.result = self._jump_name
+                self.finished = True
+        elif self.phase == "complete":
+            self.result = self._jump_name
+            self.finished = True
+        elif self.phase == "failure_cleanup":
+            if view.available and view.favorites_menu_norm is not None \
+                    and view.star_norm is not None:
+                self._tap_and_wait(*view.star_norm,
+                                   "home: close the PGSharp shortcut menu",
+                                   "failure_complete")
+            else:
+                self.finished = True
+        elif self.phase == "failure_complete":
+            self.finished = True
+
+    def advance(self) -> Optional[bool]:
+        """Return None while pending, True on success, or False on failure."""
+        if self.finished:
+            return self.result is not None
+        now = time.monotonic()
+        if now - self.started >= self.TOTAL_TIMEOUT:
+            self._fail("Timed out waiting for the PGSharp overlay")
+            return False
+        if not self.waiting_for_view:
+            if now < self.ready_at:
+                return None
+            self.waiting_for_view = True
+            self.tree_reader.request()
+        view = self.tree_reader.poll()
+        if view is None:
+            # request() coalesces while a read is in flight; repeating it lets us start
+            # promptly if an invalidated, older read was still unwinding.
+            self.tree_reader.request()
+            return None
+        self._consume(view)
+        if self.finished:
+            return self.result is not None
+        return None
+
+
 def _close_pgsharp(view, tree_reader, actuator, settle: float) -> None:
     """Leave no PGSharp surface in front of the game.
 
