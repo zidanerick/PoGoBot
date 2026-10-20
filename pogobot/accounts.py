@@ -41,6 +41,7 @@ from __future__ import annotations
 import logging
 import re
 import subprocess
+import threading
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -544,6 +545,67 @@ class UiTreeReader:
         if not payload or b"<hierarchy" not in payload:
             return AccountView(available=False)
         return parse_dump(payload, self.screen_wh)
+
+
+class AsyncUiTreeReader:
+    """Run live UI-tree ADB dumps off the runner thread.
+
+    ``request`` coalesces requests while one dump is in flight. ``poll`` returns only a
+    completed view and consumes it once. Call ``invalidate`` after an input or state exit
+    so a dump that began before the screen changed can never authorize a later action.
+    The underlying ``UiTreeReader`` still owns its bounded subprocess timeout.
+    """
+
+    def __init__(self, reader):
+        self.reader = reader
+        self._lock = threading.Lock()
+        self._generation = 0
+        self._running = False
+        self._closed = False
+        self._result: Optional[AccountView] = None
+
+    def request(self) -> bool:
+        """Start a dump if idle; return immediately whether or not one starts."""
+        with self._lock:
+            if self._closed or self._running:
+                return False
+            self._running = True
+            generation = self._generation
+
+        def work():
+            try:
+                result = self.reader.read()
+                if not isinstance(result, AccountView):
+                    result = AccountView(available=False)
+            except Exception:
+                log.exception("asynchronous account tree read failed")
+                result = AccountView(available=False)
+            with self._lock:
+                if generation == self._generation and not self._closed:
+                    self._result = result
+                self._running = False
+
+        threading.Thread(target=work, name="ui-tree-poller", daemon=True).start()
+        return True
+
+    def poll(self) -> Optional[AccountView]:
+        """Return one newly completed view, or ``None`` while no fresh view is ready."""
+        with self._lock:
+            result, self._result = self._result, None
+            return result
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._result = None
+
+    def close(self) -> None:
+        # Do not join: a timed-out ADB child can still be unwinding. It is a daemon, and
+        # generation invalidation guarantees that it cannot publish into a later run.
+        with self._lock:
+            self._closed = True
+            self._generation += 1
+            self._result = None
 
 
 class FakeTreeReader:
