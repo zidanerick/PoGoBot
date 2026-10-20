@@ -151,6 +151,7 @@ def extract(video: Path, events: list[dict], output: Path, *, recording_id: str,
     finally:
         cap.release()
     manifest = {"schema_version": 1,
+                "recording_splits": {recording_id: split},
                 "predictor": {"name": "pending", "version": "pending", "artifact_sha256": "0" * 64},
                 "episodes": episodes}
     try:
