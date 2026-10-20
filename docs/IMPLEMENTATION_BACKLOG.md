@@ -241,7 +241,7 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 ## Current PR reconciliation and merge gates
 
-The PR heads checked for this plan are #1 `5d92fc5ea8a994bc7d80415fe3f94bc62ef7b05d`, #2 `a7fb3b5adea9f7619f6e9380fa1b1935ea1e410a`, #3 `0054eb2d95f5b043fec2d2db763a0a8d348cc648`, and #4 `7e103ec4d4c57f057ca31c97f70de1221005189f`. All target main at `9795280ec52b67cde316c45aa531e64c39ddd9b8`; this plan is proposed and no branch is merged. Merge gates below apply to those exact heads and must be rechecked if a head changes.
+The inputs reconciled here were #1 contract v1.1 at `5d92fc5ea8a994bc7d80415fe3f94bc62ef7b05d`, #2 at `a7fb3b5adea9f7619f6e9380fa1b1935ea1e410a`, #3 at `0054eb2d95f5b043fec2d2db763a0a8d348cc648`, and #4 at `7e103ec4d4c57f057ca31c97f70de1221005189f`. This plan update advances only PR #1 to `3500c8be7468ad9def072268a13aad1c443ac5a5`; #2–#4 remain at the supplied heads. All target main at `9795280ec52b67cde316c45aa531e64c39ddd9b8`; no branch is merged. Recheck gates if any head changes.
 
 | PR | Scope and dependency | Exact merge acceptance | Required tests/evidence |
 |---|---|---|---|
@@ -256,7 +256,7 @@ Independent review found the gesture D8 input omission, an initial-UNKNOWN input
 
 This is a dependency order, not an instruction to merge now. Keep PR #1 as the proposed contract source. Before implementation branches consume it, reviewers and owners must accept the API and semantics in the interface-freeze gate below.
 
-1. **#1 contract v1.1 at `5d92fc5`**: approve the shared API and this ownership/order plan. No runtime code is included.
+1. **#1 contract v1.1, updated on top of `5d92fc5` to `3500c8b`**: approve the shared API and this ownership/order plan. No runtime code is included.
 2. **#3 Runtime at `0054eb2`**: rebase/continue from the accepted #1 contract. This branch supplies T01/T02 work. It is not ready to pass until all runtime acceptance tests below pass, including the current home-favorite/async-reader finding.
 3. **T03 ActionPort PR, not open**: integrate the request/receipt lifecycle, cancellation generations, Dispatch, and runner feedback. #2 transport and #4 T07 outcome linkage wait for this.
 4. **T04 event migration PR, not open**: migrate persisted events and accounting on top of T03. T08 waits for this.
