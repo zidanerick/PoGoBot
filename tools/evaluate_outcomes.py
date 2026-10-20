@@ -28,6 +28,12 @@ def load_episode_manifest(path: Path) -> dict:
     if not isinstance(episodes, list) or not episodes:
         raise ValueError("manifest must contain episodes")
     recordings, ids = {}, set()
+    recording_splits = doc.get("recording_splits")
+    if (not isinstance(recording_splits, dict) or not recording_splits
+            or any(not isinstance(key, str) or not key.strip() for key in recording_splits)
+            or any(value not in {"train", "validation", "test"}
+                   for value in recording_splits.values())):
+        raise ValueError("recording_splits must persist every recording's immutable split")
     for row in episodes:
         if not isinstance(row, dict):
             raise ValueError("episode entries must be objects")
@@ -39,6 +45,8 @@ def load_episode_manifest(path: Path) -> dict:
             raise ValueError(f"{action_id}: recording_id and explicit split required")
         if recording in recordings and recordings[recording] != split:
             raise ValueError(f"recording split leakage: {recording}")
+        if recording_splits.get(recording) != split:
+            raise ValueError(f"recording_splits disagrees with episode assignment: {recording}")
         recordings[recording] = split
         if row.get("reviewed") is not True or not str(row.get("reviewer", "")).strip():
             raise ValueError(f"{action_id}: human outcome review required")
@@ -53,7 +61,10 @@ def load_episode_manifest(path: Path) -> dict:
             if frame in seen:
                 raise ValueError(f"{action_id}: duplicate evidence path")
             seen.add(frame)
-            if sha256(frame) != item.get("sha256"):
+            digest = item.get("sha256")
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(char not in "0123456789abcdef" for char in digest)
+                    or sha256(frame) != digest):
                 raise ValueError(f"{action_id}: evidence changed since review")
     return doc
 
