@@ -248,13 +248,10 @@ def test_the_recovering_throttle_is_the_longer_of_the_two():
 
 
 def test_a_slow_read_still_buys_a_whole_interval_of_live_frames():
-    """The throttle is stamped from when the read FINISHED, not when it started.
+    """Synchronous test doubles retain finish-to-start throttling.
 
-    `tree_reader.read()` blocks the run loop's own thread. Start-to-start, a read that
-    outran its own interval made the next one eligible the instant it returned, so the
-    loop could spend most of its wall clock blind - not perceiving, not reading keys, not
-    servicing a stop request - and `map_stale_since`, which the restart ladder reads,
-    counts throughout. End-to-start makes the interval a floor on time spent looking."""
+    The live CLI uses AsyncUiTreeReader, but alternate readers can still be synchronous.
+    A slow synchronous read must not make the next request immediately eligible."""
     class _Slow:
         def __init__(self):
             self.reads = 0
