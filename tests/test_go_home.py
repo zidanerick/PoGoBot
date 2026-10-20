@@ -407,6 +407,77 @@ def test_async_home_navigation_failure_reaches_notifier():
     reader.close()
 
 
+def test_runner_reports_unknown_after_favorite_tap_without_retry_or_success(caplog):
+    """Runner polling reports an unavailable post-teleport result as failure only."""
+    from dataclasses import replace
+    import logging
+    from time import monotonic, sleep
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+
+    class _ScriptedReader:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                return _view("pgsharp_favorites")
+            return AccountView(available=False)
+
+    class _Recorder:
+        enabled = False
+
+        def __init__(self):
+            self.events = []
+
+        def problem(self, title, detail=""):
+            self.events.append(("problem", title, detail))
+
+        def switched(self, name):
+            self.events.append(("switched", name))
+
+        def finished(self, **kwargs):
+            self.events.append(("finished", kwargs))
+
+        def started(self, **kwargs): pass
+        def halted(self, *args, **kwargs): pass
+        def close(self, timeout=5.0): pass
+
+    source = _ScriptedReader()
+    reader = AsyncUiTreeReader(source)
+    recorder = _Recorder()
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader, notifier=recorder)
+    r.actuator = _Act()
+    caplog.set_level(logging.INFO)
+
+    r._on_switch_confirmed("Traveller")
+    navigator = r._home_navigation
+    assert navigator is not None
+    navigator.settle = 0
+    deadline = monotonic() + 2
+    while r._home_navigation is not None and monotonic() < deadline:
+        r._poll_home_navigation()
+        sleep(0.002)
+    # A later tick must not resend the notifier after the navigation is retired.
+    r._poll_home_navigation()
+
+    assert r._home_navigation is None
+    assert navigator.result is None
+    assert navigator.failure == "Could not verify the saved-location tap"
+    assert [event[0] for event in recorder.events] == ["switched", "problem"]
+    failures = [event for event in recorder.events if event[0] == "problem"]
+    assert len(failures) == 1
+    assert failures[0][1] == "Could not return home"
+    assert "Could not verify the saved-location tap" in failures[0][2]
+    assert not any("back at " in record.getMessage() for record in caplog.records)
+    assert source.reads == 2, "one initial read and one post-tap read, with no retry"
+    assert [reason for _, _, reason in r.actuator.taps] == [
+        "home: teleport to Home Location"]
+    reader.close()
+
+
 def test_rejected_favorite_tap_cannot_report_success():
     from pogobot.accounts import AsyncHomeNavigator
 
