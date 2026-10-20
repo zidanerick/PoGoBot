@@ -449,11 +449,16 @@ def main(argv=None) -> int:
         keyboard = KeyboardPoller(serial=a.serial).start()
         device_service = ForegroundPoller(serial=a.serial, interval=FOREGROUND_CHECK)
 
-        from .accounts import UiTreeReader
+        from .accounts import AsyncUiTreeReader, UiTreeReader
         tree_reader, account, roster = prepare_accounts(
             cfg, requested=a.account, pause_file=a.pause_file,
             make_reader=lambda: UiTreeReader(screen_wh, serial=a.serial),
             actuator=actuator)
+        # Startup account identification above is a one-shot pre-capture operation.
+        # Runtime panel checks use a worker so a slow uiautomator dump cannot stall the
+        # frame, keyboard, or signal loop.
+        if tree_reader is not None:
+            tree_reader = AsyncUiTreeReader(tree_reader)
 
     perceptor = Perceptor(cfg, det_model=det, cls_model=cls, device=dev,
                           square_cls_input=True)
