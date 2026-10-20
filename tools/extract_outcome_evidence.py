@@ -11,7 +11,10 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 
@@ -64,32 +67,68 @@ def extract(video: Path, events: list[dict], output: Path, *, recording_id: str,
             max_frames: int) -> dict:
     if split not in {"train", "validation", "test"}:
         raise ValueError("split must be train, validation or test")
+    if not isinstance(recording_id, str) or not recording_id.strip():
+        raise ValueError("recording_id must be nonempty")
+    action_ids = [event.get("action_id") for event in events]
+    if any(not isinstance(value, str) or not value.strip() for value in action_ids):
+        raise ValueError("action_id values must be nonempty strings")
+    if len(set(action_ids)) != len(action_ids):
+        raise ValueError("action_id values must be unique")
     timeline = sample_times(events, before, after, interval, max_frames)
+    # Extraction is append-only. Refuse existing outputs before opening the video or
+    # touching any evidence, then use exclusive creates as a second collision guard.
+    if output.exists():
+        raise FileExistsError(f"manifest already exists: {output}")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    frames_dir = output.parent / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+    planned_by_event = {}
+    for event in events:
+        event_tag = hashlib.sha256(event["action_id"].encode()).hexdigest()
+        event_paths = []
+        for frame_index, ts in enumerate(timeline[event["action_id"]]):
+            filename = (f"{_safe_stem(event['action_id'])}_{event_tag}_"
+                        f"{frame_index:03d}_{int(round(ts * 1000)):010d}.jpg")
+            event_paths.append(frames_dir / filename)
+        planned_by_event[event["action_id"]] = event_paths
+    planned = [path for event_paths in planned_by_event.values() for path in event_paths]
+    if len(set(planned)) != len(planned):
+        raise ValueError("event IDs produce duplicate evidence frame paths")
+    collisions = [path for path in planned if path.exists()]
+    if collisions:
+        raise FileExistsError(f"evidence frame already exists: {collisions[0]}")
     try:
         import cv2
     except ImportError as exc:
         raise RuntimeError("install the project's opencv-python requirement to read video") from exc
     cap = cv2.VideoCapture(str(video))
     if not cap.isOpened():
+        cap.release()
         raise ValueError(f"cannot open video: {video}")
-    frames_dir = output.parent / "frames"
-    frames_dir.mkdir(parents=True, exist_ok=True)
     episodes, created = [], []
+    manifest_created = False
     try:
         for event in events:
             evidence = []
-            event_tag = hashlib.sha256(event["action_id"].encode()).hexdigest()[:8]
             for frame_index, ts in enumerate(timeline[event["action_id"]]):
                 cap.set(cv2.CAP_PROP_POS_MSEC, ts * 1000)
                 ok, frame = cap.read()
                 if not ok or frame is None:
                     continue
-                filename = (f"{_safe_stem(event['action_id'])}_{event_tag}_"
-                            f"{frame_index:03d}_{int(round(ts * 1000)):010d}.jpg")
-                path = frames_dir / filename
-                if not cv2.imwrite(str(path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
-                    raise OSError(f"could not write evidence frame: {path}")
-                created.append(path)
+                path = planned_by_event[event["action_id"]][frame_index]
+                filename = path.name
+                fd, temp_name = tempfile.mkstemp(prefix=".outcome-frame-", suffix=".jpg", dir=frames_dir)
+                os.close(fd)
+                temp = Path(temp_name)
+                try:
+                    if not cv2.imwrite(str(temp), frame, [cv2.IMWRITE_JPEG_QUALITY, 95]):
+                        raise OSError(f"could not write temporary evidence frame: {path}")
+                    with path.open("xb") as output_file:
+                        created.append(path)
+                        with temp.open("rb") as input_file:
+                            shutil.copyfileobj(input_file, output_file)
+                finally:
+                    temp.unlink(missing_ok=True)
                 digest = hashlib.sha256(path.read_bytes()).hexdigest()
                 evidence.append({"path": str(Path("frames") / filename), "sha256": digest})
             if not evidence:
@@ -114,8 +153,17 @@ def extract(video: Path, events: list[dict], output: Path, *, recording_id: str,
     manifest = {"schema_version": 1,
                 "predictor": {"name": "pending", "version": "pending", "artifact_sha256": "0" * 64},
                 "episodes": episodes}
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, indent=2) + "\n")
+    try:
+        with output.open("x", encoding="utf-8") as output_file:
+            manifest_created = True
+            json.dump(manifest, output_file, indent=2)
+            output_file.write("\n")
+    except Exception:
+        for path in created:
+            path.unlink(missing_ok=True)
+        if manifest_created:
+            output.unlink(missing_ok=True)
+        raise
     return manifest
 
 

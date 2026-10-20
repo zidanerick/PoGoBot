@@ -92,21 +92,32 @@ def cmd_promote(dest: Path, yes: bool, review_manifest: Path | None = None) -> i
         existing = load_manifest(provenance) if provenance.exists() else None
         if existing and existing["classes"] != doc["classes"]:
             raise ValueError("destination class mapping differs")
+        if existing is not None and "recording_splits" not in existing:
+            raise ValueError("destination provenance lacks recording_splits; add the complete historical assignment registry before promoting")
         if not existing and dest.exists() and any(dest.iterdir()):
             raise ValueError("nonempty destination has no reviewed provenance manifest; migrate explicitly")
         previous = existing["samples"] if existing else []
         ids = {r["id"] for r in previous}
         hashes = {r["review"]["image_sha256"] for r in previous}
-        # A newly supplied registry cannot assign an existing training recording to a
-        # held-out split. The registry must include every known recording.
-        train_groups = {r["recording_id"] for r in previous}
-        if any(r["recording_id"] in train_groups and r["split"] != "train" for r in doc["samples"]):
-            raise ValueError("existing training recording was assigned to a held-out split")
+        # Keep assignments for every recording, including validation/test recordings
+        # omitted by a later source manifest. Never infer a new split for a known ID.
+        assignments = dict(existing.get("recording_splits", {})) if existing else {}
+        for recording, split in doc.get("recording_splits", {}).items():
+            if recording in assignments and assignments[recording] != split:
+                raise ValueError(f"immutable recording split changed: {recording} was {assignments[recording]}, now {split}")
+            assignments[recording] = split
+        for row in doc["samples"]:
+            recording, split = row["recording_id"], row["split"]
+            if recording in assignments and assignments[recording] != split:
+                raise ValueError(f"immutable recording split changed: {recording} was {assignments[recording]}, now {split}")
+            assignments[recording] = split
         jobs, exported = [], []
         targets = set()
         for row in rows:
             if row["id"] in ids or row["review"]["image_sha256"] in hashes:
                 raise ValueError("sample already promoted")
+            if Path(row["image"]).stem != Path(row["labels"]).stem:
+                raise ValueError(f"{row['id']}: image and label stems must match for YOLO pairing")
             out = dict(row)
             for field, folder in (("image", "images"), ("labels", "labels")):
                 src = local_path(source.parent, row[field])
@@ -131,7 +142,9 @@ def cmd_promote(dest: Path, yes: bool, review_manifest: Path | None = None) -> i
                     created.append(target)
                     with src.open("rb") as input_file:
                         shutil.copyfileobj(input_file, output)
-            updated = {"schema_version": 1, "classes": doc["classes"], "samples": previous + exported}
+            updated = {"schema_version": 1, "classes": doc["classes"],
+                       "recording_splits": dict(sorted(assignments.items())),
+                       "samples": previous + exported}
             pending = dest / "review_manifest.pending.json"
             if pending.exists():
                 raise ValueError("pending manifest exists; inspect previous interrupted promotion")

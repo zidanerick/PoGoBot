@@ -47,7 +47,9 @@ python tools/evaluate_detector.py \
 
 `model-class-map.json` is a JSON object whose keys exactly match all names in `model.names`, and whose values match canonical manifest class names, for example `{"pokemon_go":"pokemon","pokestop":"pokestop","rocket_battle":"rocket"}`. Select the confidence threshold on validation data. Then run the untouched test split with the frozen threshold. Report sample and recording counts beside every metric. Keep test recordings disjoint from training and validation recordings.
 
-Promotion uses the same approved manifest and copies only `train` samples. It refuses changed files, unreviewed labels, duplicate samples, class-map changes, and nonempty destinations without provenance. It retains the source and writes a checked manifest next to copied training data:
+Promotion uses the same approved manifest and copies only `train` samples. It refuses changed files, unreviewed labels, duplicate samples, class-map changes, incompatible image/label filename stems, and nonempty destinations without provenance. It retains the source and writes a checked manifest next to copied training data. That promoted manifest also stores a `recording_splits` map for every assignment in the source manifest, including validation and test recordings that were not copied. Later promotions merge new assignments from both source samples and an optional source `recording_splits` registry, and refuse any changed assignment, even when that recording was omitted from the later sample list.
+
+Existing promoted datasets created before this registry was added have no way to reveal omitted validation/test assignments. Promotion therefore refuses a destination provenance manifest without `recording_splits`; add a complete historical recording-to-split registry before continuing. This fail-closed migration is necessary because the missing assignments cannot be reconstructed from the copied training files alone.
 
 ```sh
 python tools/promote_reviewed.py --promote --manifest datasets/reviewed/manifest.json
@@ -97,7 +99,7 @@ python tools/extract_outcome_evidence.py \
   --output datasets/outcomes/session-01.json
 ```
 
-The defaults save frames from two seconds before through twelve seconds after each action at one-second intervals, with a 64-frame per-action limit. Adjust the window to match the event; keep adjacent events from the same recording in one split. The tool does not infer outcomes. It writes `unknown` labels with `reviewed: false`, so its output must be reviewed and completed before scoring. Keep recordings and generated screenshots local unless you have checked them for account names, location details and other private screen content.
+The defaults save frames from two seconds before through twelve seconds after each action at one-second intervals, with a 64-frame per-action limit. Adjust the window to match the event; keep adjacent events from the same recording in one split. The tool does not infer outcomes. It writes `unknown` labels with `reviewed: false`, so its output must be reviewed and completed before scoring. Extraction is append-only: an existing manifest or any planned frame path causes an immediate refusal. If frame extraction or manifest writing fails partway through, only files created by that attempt are removed; pre-existing files are left untouched. Use a new output directory for a separate run. Keep recordings and generated screenshots local unless you have checked them for account names, location details and other private screen content.
 
 ## Current data limitation
 

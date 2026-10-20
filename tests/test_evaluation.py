@@ -73,19 +73,35 @@ def test_outcome_metrics_refuse_unreviewed_or_duplicate_actions():
         evaluate_outcomes([dict(base, reviewed=False)])
 
 
-def make_manifest(root: Path, *, split="train", approved=True):
-    (root / "images").mkdir(parents=True)
-    (root / "labels").mkdir()
-    image, labels = root / "images" / "a.png", root / "labels" / "a.txt"
-    image.write_bytes(b"image bytes")
+def add_manifest_sample(root: Path, doc: dict, *, sample_id: str, recording_id: str,
+                        split: str, image_stem: str | None = None,
+                        label_stem: str | None = None):
+    (root / "images").mkdir(parents=True, exist_ok=True)
+    (root / "labels").mkdir(parents=True, exist_ok=True)
+    image_stem = image_stem or sample_id
+    label_stem = label_stem or sample_id
+    image, labels = root / "images" / f"{image_stem}.png", root / "labels" / f"{label_stem}.txt"
+    image.write_bytes(f"image bytes {sample_id}".encode())
     labels.write_text("0 0.5 0.5 0.2 0.2\n")
     import hashlib
     h = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
-    doc = {"schema_version": 1, "classes": {"0": "pokemon"}, "samples": [{
-        "id": "a", "recording_id": "session-a", "split": split,
-        "image": "images/a.png", "labels": "labels/a.txt",
-        "review": {"approved": approved, "exhaustive": True, "reviewer": "r", "image_sha256": h(image), "labels_sha256": h(labels)}
-    }]}
+    if "samples" not in doc:
+        doc.update(schema_version=1, classes={"0": "pokemon"}, samples=[])
+    doc["samples"].append({
+        "id": sample_id, "recording_id": recording_id, "split": split,
+        "image": str(Path("images") / image.name), "labels": str(Path("labels") / labels.name),
+        "review": {"approved": True, "exhaustive": True, "reviewer": "r",
+                   "image_sha256": h(image), "labels_sha256": h(labels)}
+    })
+    return image, labels
+
+
+def make_manifest(root: Path, *, split="train", approved=True, image_stem="a", label_stem="a"):
+    doc = {"schema_version": 1, "classes": {"0": "pokemon"}, "samples": []}
+    image, labels = add_manifest_sample(root, doc, sample_id="a", recording_id="session-a",
+                                        split=split, image_stem=image_stem, label_stem=label_stem)
+    if not approved:
+        doc["samples"][0]["review"]["approved"] = False
     path = root / "manifest.json"
     path.write_text(json.dumps(doc))
     return path, doc, image, labels
@@ -97,7 +113,7 @@ def test_manifest_rejects_modified_file_and_split_leakage(tmp_path):
     image.write_bytes(b"changed")
     with pytest.raises(ValueError, match="changed since review"):
         load_manifest(path)
-    image.write_bytes(b"image bytes")
+    image.write_bytes(b"image bytes a")
     doc["samples"].append(dict(doc["samples"][0], id="b", split="test"))
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="split leakage"):
@@ -132,6 +148,45 @@ def test_promotion_copies_only_approved_training_data_and_records_provenance(tmp
 def test_promotion_refuses_held_out_sample(tmp_path):
     path, _, _, _ = make_manifest(tmp_path / "source", split="test")
     assert cmd_promote(tmp_path / "dest", True, path) == 2
+
+
+def test_promotion_preserves_all_recording_assignments_when_later_manifest_omits_them(tmp_path):
+    source = tmp_path / "source"
+    path, doc, _, _ = make_manifest(source)
+    add_manifest_sample(source, doc, sample_id="val", recording_id="validation-session", split="validation")
+    add_manifest_sample(source, doc, sample_id="test", recording_id="test-session", split="test")
+    path.write_text(json.dumps(doc))
+    dest = tmp_path / "dest"
+    assert cmd_promote(dest, True, path) == 0
+
+    later = tmp_path / "later"
+    later.mkdir()
+    later_doc = {"schema_version": 1, "classes": {"0": "pokemon"}, "samples": []}
+    add_manifest_sample(later, later_doc, sample_id="new", recording_id="new-train-session", split="train")
+    later_manifest = later / "manifest.json"
+    later_manifest.write_text(json.dumps(later_doc))
+    assert cmd_promote(dest, True, later_manifest) == 0
+    promoted = load_manifest(dest / "review_manifest.json")
+    assert promoted["recording_splits"] == {
+        "session-a": "train", "validation-session": "validation",
+        "test-session": "test", "new-train-session": "train"
+    }
+
+    conflicting = tmp_path / "conflicting"
+    conflicting.mkdir()
+    conflict_doc = {"schema_version": 1, "classes": {"0": "pokemon"}, "samples": []}
+    add_manifest_sample(conflicting, conflict_doc, sample_id="changed", recording_id="validation-session", split="test")
+    conflict_manifest = conflicting / "manifest.json"
+    conflict_manifest.write_text(json.dumps(conflict_doc))
+    assert cmd_promote(dest, True, conflict_manifest) == 2
+    assert load_manifest(dest / "review_manifest.json")["recording_splits"]["validation-session"] == "validation"
+
+
+def test_promotion_refuses_image_label_stem_mismatch(tmp_path):
+    path, _, _, _ = make_manifest(tmp_path / "source", image_stem="image-a", label_stem="label-a")
+    dest = tmp_path / "dest"
+    assert cmd_promote(dest, True, path) == 2
+    assert not dest.exists()
 
 
 def make_outcome_manifest(root: Path, *, split="validation"):
@@ -232,3 +287,107 @@ def test_video_extractor_writes_hashed_unreviewed_frames_without_cv2_install(tmp
     for item in episode["evidence"]:
         frame = tmp_path / item["path"]
         assert hashlib.sha256(frame.read_bytes()).hexdigest() == item["sha256"]
+
+    manifest_bytes = out.read_bytes()
+    frame_bytes = {p: p.read_bytes() for p in (tmp_path / "frames").glob("*.jpg")}
+    with pytest.raises(FileExistsError, match="manifest already exists"):
+        extract(tmp_path / "fake.mp4", [{"action_id": "a/1", "timestamp_s": 3.0}], out,
+                recording_id="session-a", split="train", before=1, after=1,
+                interval=1, max_frames=5)
+    assert out.read_bytes() == manifest_bytes
+    assert {p: p.read_bytes() for p in frame_bytes} == frame_bytes
+
+    second_manifest = tmp_path / "rerun.json"
+    with pytest.raises(FileExistsError, match="evidence frame already exists"):
+        extract(tmp_path / "fake.mp4", [{"action_id": "a/1", "timestamp_s": 3.0}], second_manifest,
+                recording_id="session-a", split="train", before=1, after=1,
+                interval=1, max_frames=5)
+    assert not second_manifest.exists()
+    assert out.read_bytes() == manifest_bytes
+    assert {p: p.read_bytes() for p in frame_bytes} == frame_bytes
+
+
+def test_video_extractor_rolls_back_partial_frames_without_touching_existing_files(tmp_path, monkeypatch):
+    import sys
+    import types
+    from tools.extract_outcome_evidence import extract
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    keep = frames / "keep.jpg"
+    keep.write_bytes(b"pre-existing")
+
+    class FakeCapture:
+        def __init__(self, path): self.ts = 0
+        def isOpened(self): return True
+        def set(self, prop, value): self.ts = value; return True
+        def read(self): return True, self.ts
+        def release(self): pass
+
+    writes = 0
+    def fail_second_write(path, frame, options):
+        nonlocal writes
+        writes += 1
+        Path(path).write_bytes(str(frame).encode())
+        return writes < 2
+
+    fake = types.SimpleNamespace(VideoCapture=FakeCapture, CAP_PROP_POS_MSEC=0,
+                                 IMWRITE_JPEG_QUALITY=1, imwrite=fail_second_write)
+    monkeypatch.setitem(sys.modules, "cv2", fake)
+    out = tmp_path / "session.json"
+    with pytest.raises(OSError, match="temporary evidence frame"):
+        extract(tmp_path / "fake.mp4", [{"action_id": "event-1", "timestamp_s": 3.0}], out,
+                recording_id="session-a", split="train", before=1, after=1,
+                interval=1, max_frames=5)
+    assert not out.exists()
+    assert list(frames.iterdir()) == [keep]
+    assert keep.read_bytes() == b"pre-existing"
+
+
+def test_video_extractor_rolls_back_frames_when_manifest_write_is_partial(tmp_path, monkeypatch):
+    import sys
+    import types
+    from tools import extract_outcome_evidence as extractor
+
+    frames = tmp_path / "frames"
+    frames.mkdir()
+    keep = frames / "keep.jpg"
+    keep.write_bytes(b"pre-existing")
+
+    class FakeCapture:
+        def __init__(self, path): self.ts = 0
+        def isOpened(self): return True
+        def set(self, prop, value): self.ts = value; return True
+        def read(self): return True, self.ts
+        def release(self): pass
+
+    def fake_imwrite(path, frame, options):
+        Path(path).write_bytes(str(frame).encode())
+        return True
+
+    fake = types.SimpleNamespace(VideoCapture=FakeCapture, CAP_PROP_POS_MSEC=0,
+                                 IMWRITE_JPEG_QUALITY=1, imwrite=fake_imwrite)
+    monkeypatch.setitem(sys.modules, "cv2", fake)
+
+    def partial_dump(doc, output, **kwargs):
+        output.write("{")
+        raise OSError("simulated manifest write failure")
+
+    monkeypatch.setattr(extractor.json, "dump", partial_dump)
+    out = tmp_path / "session.json"
+    with pytest.raises(OSError, match="manifest write failure"):
+        extractor.extract(tmp_path / "fake.mp4", [{"action_id": "event-2", "timestamp_s": 3.0}], out,
+                          recording_id="session-a", split="train", before=1, after=1,
+                          interval=1, max_frames=5)
+    assert not out.exists()
+    assert list(frames.iterdir()) == [keep]
+    assert keep.read_bytes() == b"pre-existing"
+
+
+def test_readme_is_plain_readable_markdown_with_balanced_fences_and_no_wrapper_html():
+    readme = (Path(__file__).resolve().parents[1] / "README.md").read_text()
+    assert readme.startswith("# PoGoBot\n")
+    assert readme.count("```") % 2 == 0
+    assert not any(tag in readme for tag in ("<div", "</div>", "<picture", "<img", "<sub>"))
+    assert "no model accuracy claim" in " ".join(readme.lower().split())
+    assert "detector recall-75.9" not in readme

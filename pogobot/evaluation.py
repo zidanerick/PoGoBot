@@ -75,6 +75,12 @@ def load_manifest(path: Path) -> dict:
     samples = doc.get("samples")
     if not isinstance(samples, list) or not samples:
         raise ValueError("manifest must contain samples")
+    recording_splits = doc.get("recording_splits")
+    if recording_splits is not None:
+        if (not isinstance(recording_splits, dict)
+                or any(not isinstance(k, str) or not k.strip() for k in recording_splits)
+                or any(v not in {"train", "validation", "test"} for v in recording_splits.values())):
+            raise ValueError("recording_splits must map recording IDs to valid immutable splits")
     recordings, images, paths, ids = {}, {}, set(), set()
     for row in samples:
         sid, group, split = row.get("id"), row.get("recording_id"), row.get("split")
@@ -85,6 +91,8 @@ def load_manifest(path: Path) -> dict:
             raise ValueError(f"{sid}: recording_id and explicit split required")
         if group in recordings and recordings[group] != split:
             raise ValueError(f"recording split leakage: {group}")
+        if recording_splits is not None and recording_splits.get(group) != split:
+            raise ValueError(f"recording_splits disagrees with sample assignment: {group}")
         recordings[group] = split
         review = row.get("review", {})
         if (review.get("approved") is not True or review.get("exhaustive") is not True
