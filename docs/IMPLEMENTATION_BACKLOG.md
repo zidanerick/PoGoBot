@@ -256,7 +256,7 @@ Review status at this recheck: #1's clock-domain and FrameRef clarifications rem
 
 This is a dependency order, not an instruction to merge now. Keep PR #1 as the proposed contract source. Before implementation branches consume it, reviewers and owners must accept the API and semantics in the interface-freeze gate below.
 
-1. **#1 contract v1.1, updated on top of `5d92fc5` to `3500c8b`**: approve the shared API and this ownership/order plan. No runtime code is included.
+1. **#1 contract v1.1 and integration plan**: review the current shared contract branch and accept its API/ownership/order proposal before implementation branches rely on it. No runtime code is included.
 2. **#3 Runtime at `125c4c9`**: rebase/continue from the accepted #1 contract. Recovery/rotation/polling work is present. Integration remains blocked by the UNKNOWN-foreground Back path, the post-teleport UNKNOWN notifier test and exact-head suite.
 3. **T03 ActionPort PR, not open**: integrate the request/receipt lifecycle, cancellation generations, Dispatch, and runner feedback. #2 transport and #4 T07 outcome linkage wait for this.
 4. **T04 event migration PR, not open**: migrate persisted events and accounting on top of T03. T08 waits for this.
