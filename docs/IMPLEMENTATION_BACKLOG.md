@@ -1,6 +1,6 @@
 # PoGoBot shared interfaces and ordered implementation backlog
 
-Status: proposed integration contract v1.1, 21 October 2026. This revision resolves independent-review gaps in clock domains and capture identity. APIs remain proposals until implemented and accepted.
+Status: proposed integration contract v1.1, 21 October 2026. This revision resolves independent-review gaps in clock domains and capture identity. APIs remain proposals until implemented and accepted. PR #1 is documentation only: every API and field introduced there remains a proposal until its owning implementation ticket is integrated and passes its acceptance tests.
 
 Repository: https://github.com/zidanerick/PoGoBot
 
@@ -254,18 +254,19 @@ Review status at this recheck: #1's clock-domain and FrameRef clarifications rem
 
 ### Proposed branch order
 
-This is a dependency order, not an instruction to merge now. Keep PR #1 as the proposed contract source. Before implementation branches consume it, reviewers and owners must accept the API and semantics in the interface-freeze gate below.
+This is a dependency order, not an instruction to merge now. The supplied heads are #1 `1973b33`, #2 `b353d0d`, #3 `125c4c9`, and #4 `c2cd5ae`; all remain unmerged. PR #1 is the proposed contract source only. Before implementation branches consume it, reviewers and owners must accept the API and semantics in the interface-freeze gate below.
 
-1. **#1 contract v1.1 and integration plan**: review the current shared contract branch and accept its API/ownership/order proposal before implementation branches rely on it. No runtime code is included.
-2. **#3 Runtime at `125c4c9`**: rebase/continue from the accepted #1 contract. Recovery/rotation/polling work is present. Integration remains blocked by the UNKNOWN-foreground Back path, the post-teleport UNKNOWN notifier test and exact-head suite.
-3. **T03 ActionPort PR, not open**: integrate the request/receipt lifecycle, cancellation generations, Dispatch, and runner feedback. #2 transport and #4 T07 outcome linkage wait for this.
-4. **T04 event migration PR, not open**: migrate persisted events and accounting on top of T03. T08 waits for this.
-5. **Parallel after T03, with disjoint ownership**:
-   - **#2 Gesture at `b353d0d` / T06**: pure planner can be reviewed against #1 independently; transport adapter waits for T03 and must use its ActionPort, FrameRef and cancellation generation.
-   - **#4 Perception at `c2cd5ae` / T05 + T07**: split before merge. T05 detector/evaluation data integrity depends on #1 and T01; it can be prepared after #1 and merges after T01. T07 runtime-linked outcome evidence depends on T03 and T05.
-6. **T08 Autoplay PR, not open**: only after T03, T04, T06 and T07 have passed their gates and the interface-freeze gate is accepted.
-7. **T09 stop/restock PR, not open**: after T08.
-8. **T10 fault/replay and supervised milestone**: after T09. No automated live release before this gate.
+1. **#1 contract v1.1 review**: accept the proposal, ownership, sequence and acceptance criteria. This is a review gate, not implementation.
+2. **T01 shared runtime seam, lead-owned**: implement dual clocks, DeviceServices, capture-stamped FrameRef propagation, replay isolation and baseline tests. PR #3 must rebase/adapt on this seam before its runtime behavior is integrated.
+3. **#3 Runtime at `125c4c9` / T02, Runtime-owned source and lead-integrated shared edits**: close UNKNOWN-foreground screen-input and Runner-level post-teleport notifier gates; pass recovery, rotation and async poll tests on exact head/follow-up. This gate blocks T03 and phone testing.
+4. **T03 ActionPort, reliability-owned internals with lead-owned shared edits**: integrate request/receipt lifecycle, cancellation generations, Dispatch and Runner feedback. Gesture transport and T07 outcome linkage wait for this.
+5. **T04 event migration, lead-owned**: migrate persisted events/accounting on top of T03; T08 waits for this.
+6. **Parallel after T03 with disjoint ownership**:
+   - **#2 Gesture at `b353d0d` / T06**: review pure planner independently; transport adapter waits for T03 and consumes its ActionPort, FrameRef, Clock and cancellation generation. Real D8/device evidence is required only for the phone gate.
+   - **#4 Perception at `c2cd5ae` / T05 then T07**: T05 data integrity follows T01; T07 runtime-linked evidence follows T03 and T05. Keep evaluation/extraction changes separate from runtime evidence integration.
+7. **T08 Autoplay, not open**: after T03, T04, T06 and T07 acceptance and explicit interface-freeze sign-off.
+8. **T09 stop/restock, not open**: after T08.
+9. **T10 fault/replay, then supervised phone gate**: after T09 and every pre-phone criterion above. No automated live release before this gate.
 
 No Autoplay PR is open at these heads. Autoplay may develop isolated policy tests against frozen interfaces, but its implementation branch must not redefine clock, frame identity, action receipts, evidence, or event schemas.
 
@@ -292,9 +293,27 @@ These tests target release-blocking failure semantics. Use deterministic fake cl
 | Cancellation | Hold action A in transport, queue B, invalidate by pause/halt/capture reset/episode change, then release A. Race invalidation against start using barriers. Close with queued work. | If invalidation wins, B never starts and ends CANCELLED/EXPIRED. If start wins, result marks in-flight uncertainty honestly. Close never flushes queued input. No blind retry of uncertain execution. | T03 ActionPort/fault tests; T06 adapter tests. |
 | Unknown outcome | Encounter action accepted/executed but no fresh distinguishing result; async home navigation receives unavailable/stale/timed-out tree after teleport; evaluator receives unknown prediction. | Encounter does not throw again or count a catch/reward. Navigation returns UNKNOWN/failure, never success, notifies once and performs no guessed tap/retry. Evaluation records abstention, not a positive outcome. | Autoplay T08 requires T03/T07. Home navigation is a current #3 release gate. |
 
-### Contract field status at recheck
+### Pre-phone smoke sequence and release gate
 
-| Contract area | Status at current PR heads |
+No supervised gameplay phone smoke is authorized by the current evidence. The following sequence is required before the first supervised phone session; do not skip or reorder gates.
+
+1. **Accept the interface freeze.** Owners review Contract v1.1 signatures and invariants. This accepts the proposal for implementation; it does not make PR #1 fields runtime behavior. Keep a written agreement on both clock domains, immutable FrameRef propagation, ActionPort lifecycle/cancellation, evidence/outcome association and event timestamp names.
+2. **Complete T01 against the integrated target.** Implement/inject the shared Clock and DeviceServices, stamp FrameRef at capture, propagate it unchanged through Observation and Evidence, and prove replay is device-free. Run the T01 dual-clock, epoch-reset, delayed-result, unknown-foreground and hermeticity tests.
+3. **Close the #3 Runtime gates on exact head or its owning follow-up.** Fix the public UNKNOWN-foreground Back path. Add the Runner-level async home-navigation test described below. Run focused Runner/FSM/device/account tests, then the full available suite; report exact commit, command, pass/fail/skip counts and exclusions. Do not treat historical counts as current-head evidence.
+4. **Complete T02, T03 and T04 in dependency order.** Pass recovery/rotation acceptance, then ActionPort rejection/start/cancellation/uncertainty tests, then v2 event round-trip/deduplication and legacy-label tests. Require no frame-loop blocking and no silent receipt loss.
+5. **Complete phone-relevant T06 integration and T07 evidence gates.** For any gesture path in the smoke, build a real Java/D8 artifact and inspect the generated DEX for Gesture and all required nested classes; synthetic DEX fixtures do not satisfy this gate. Validate release/cancellation behavior on the actual device. T07 must preserve FrameRef, reject old-epoch evidence and abstain on unknown or conflicting results. Offline T05 alone is not runtime evidence.
+6. **Run T08/T09 deterministic replay acceptance before gameplay smoke.** Cover confirmed catch, flee, breakout, attack, no-balls, timeout, cancellation and unknown. Assert bounded actions, no retry on uncertain execution, no unknown-to-success promotion, no unsupported restock or purchases, and stop behavior on quota/health limits.
+7. **Perform one attended, bounded phone session.** Record device model/OS, app/client version, ADB/tool versions, branch and commit SHAs, profile/config, start/end monotonic timestamps and event/evidence trace. Use an explicitly selected test profile and account, visible screen, an operator at the device, a short time/action cap and a tested stop control. First verify device identity and foreground classification, then exercise the selected supported startup/navigation/input path, confirm pointer/input release and stop handling, and inspect the resulting trace before extending duration. Abort on UNKNOWN foreground, stale FrameRef, rejected/uncertain action, unexpected screen, notifier failure or missing evidence. Do not claim model accuracy or unattended readiness from this smoke.
+
+**Runner-level post-teleport notifier assertion (required #3 gate):** configure an account switch with home_favorite; have the fake async reader return a fresh favorites tree; accept the favorite tap; then return an unavailable result for the post-teleport home tree. Drive the public Runner poll/tick path. Assert navigation is failure/UNKNOWN, the notifier is called exactly once, no success result/log is emitted, and no guessed tap or retry is submitted. Poll the same terminal result again and assert notification remains exactly once. Also cover stale and timed-out post-teleport results and cancellation after invalidation. Direct AsyncHomeNavigator tests do not satisfy this Runner-level gate.
+
+**Evidence still missing at the supplied heads:** exact-head test execution for #3/#4; the #3 UNKNOWN-foreground no-input public-path test and Runner-level notifier test; integrated dual-clock/FrameRef runtime behavior (currently PR #1 proposal); shared ActionPort runtime behavior; real D8 output and supervised device input/release evidence for #2; and a supervised trace from the integrated branch. Until those artifacts exist, only offline source/tests may be reviewed and the phone smoke gate remains closed.
+
+### Contract field status at supplied PR heads
+
+Every v1.1 field in PR #1 remains a proposal until its implementation ticket is integrated. The status below distinguishes proposal text from behavior present in specialist source; source presence alone is not a passing gate.
+
+| Contract area | Status at supplied PR heads |
 |---|---|
 | MonotonicSeconds, ActiveSeconds, Clock, FrameRef, DeviceServices protocol and capture-to-evidence propagation | Proposed in #1 v1.1. #3 has device pollers and pause-adjusted legacy FSM time, but no shared dual-domain Clock or FrameRef propagation. |
 | ActionRequest, Submission, ActionEvent, ActionPort, Dispatch, action generations and cancellation lifecycle | Proposed in #1. #3 still uses acceptance-style apply(effect)->bool; #2 has an isolated gesture transport/receipt path, not the shared ActionPort. |
