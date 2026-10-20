@@ -3,7 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from pogobot.evaluation import Box, evaluate_frames, evaluate_outcomes, load_manifest
+from pogobot.evaluation import (Box, bootstrap_outcome_intervals, evaluate_frames,
+                                evaluate_outcomes, load_manifest)
 from tools.promote_reviewed import cmd_promote
 
 
@@ -43,6 +44,25 @@ def test_outcomes_count_one_per_action_and_unknown_as_abstention():
     assert result["correct_all_episodes"] == pytest.approx(1 / 3)
     assert result["abstentions"] == 1
     assert result["confusion"]["fled"]["unknown"] == 1
+
+
+def test_outcome_intervals_resample_recordings_deterministically_and_mark_small_samples():
+    rows = [
+        {"action_id": "a1", "recording_id": "a", "truth": "caught", "prediction": "caught", "reviewed": True, "evidence": "a/1.png"},
+        {"action_id": "a2", "recording_id": "a", "truth": "caught", "prediction": "caught", "reviewed": True, "evidence": "a/2.png"},
+        {"action_id": "b1", "recording_id": "b", "truth": "caught", "prediction": "fled", "reviewed": True, "evidence": "b/1.png"},
+        {"action_id": "c1", "recording_id": "c", "truth": "fled", "prediction": "fled", "reviewed": True, "evidence": "c/1.png"},
+    ]
+    first = bootstrap_outcome_intervals(rows, resamples=250, confidence=.90, seed=7)
+    second = bootstrap_outcome_intervals(rows, resamples=250, confidence=.90, seed=7)
+    assert first == second
+    assert first["method"] == "recording_cluster_percentile_bootstrap"
+    assert first["independent_recordings"] == 3
+    interval = first["intervals"]["correct_all_episodes"]
+    assert 0 <= interval["lower"] <= interval["upper"] <= 1
+    single = bootstrap_outcome_intervals(rows[:2], resamples=20)
+    assert single["intervals"] is None
+    assert "two independent recordings" in single["note"]
 
 
 def test_outcome_metrics_refuse_unreviewed_or_duplicate_actions():
@@ -164,6 +184,7 @@ def test_outcome_cli_writes_machine_readable_metrics(tmp_path):
     assert report["episodes"] == 1
     assert report["covered_accuracy"] == 1.0
     assert report["predictor"]["version"] == "candidate-1"
+    assert report["uncertainty"]["intervals"] is None
 
 
 def test_evidence_sampling_is_bounded_and_rejects_invalid_csv(tmp_path):

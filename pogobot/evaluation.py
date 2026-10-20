@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import random
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -204,3 +205,70 @@ def evaluate_outcomes(rows: list[dict]) -> dict:
             "correct_all_episodes": correct / n,
             "abstentions": n - covered, "confusion": {k: dict(v) for k, v in matrix.items()},
             "per_class": per_class}
+
+
+def bootstrap_outcome_intervals(rows: list[dict], *, resamples: int = 2000,
+                                confidence: float = 0.95, seed: int = 0) -> dict:
+    """Estimate uncertainty by resampling whole recordings, not correlated episodes.
+
+    The percentile intervals describe between-recording sampling variation. They are
+    not a substitute for a held-out test set, and are withheld for fewer than two
+    independent recordings.
+    """
+    if not isinstance(resamples, int) or resamples < 1:
+        raise ValueError("resamples must be a positive integer")
+    if not math.isfinite(confidence) or not 0 < confidence < 1:
+        raise ValueError("confidence must be between 0 and 1")
+    if not isinstance(seed, int):
+        raise ValueError("seed must be an integer")
+    evaluate_outcomes(rows)  # validate reviewed labels and unique action IDs first
+    groups: dict[str, list[dict]] = {}
+    for row in rows:
+        groups.setdefault(row["recording_id"], []).append(row)
+    names = ("coverage", "covered_accuracy", "correct_all_episodes")
+    values = {name: [] for name in names}
+    for label in OUTCOMES:
+        values[f"per_class.{label}.precision"] = []
+        values[f"per_class.{label}.recall"] = []
+    if len(groups) < 2:
+        return {"method": "recording_cluster_percentile_bootstrap",
+                "confidence_level": confidence, "requested_resamples": resamples,
+                "seed": seed, "independent_recordings": len(groups), "intervals": None,
+                "note": "need at least two independent recordings for an interval"}
+
+    recording_ids = list(groups)
+    rng = random.Random(seed)
+    for iteration in range(resamples):
+        sampled = rng.choices(recording_ids, k=len(recording_ids))
+        replicate = []
+        for draw, recording_id in enumerate(sampled):
+            for row in groups[recording_id]:
+                replicate.append({**row,
+                                  "action_id": f"{row['action_id']}#bootstrap-{iteration}-{draw}",
+                                  "recording_id": f"{recording_id}#bootstrap-{draw}"})
+        metrics = evaluate_outcomes(replicate)
+        for name in names:
+            values[name].append(metrics[name])
+        for label in OUTCOMES:
+            for metric in ("precision", "recall"):
+                values[f"per_class.{label}.{metric}"].append(metrics["per_class"][label][metric])
+
+    alpha = (1 - confidence) / 2
+
+    def quantile(data: list[float], probability: float) -> float:
+        ordered = sorted(data)
+        position = (len(ordered) - 1) * probability
+        low = math.floor(position)
+        high = math.ceil(position)
+        return ordered[low] + (ordered[high] - ordered[low]) * (position - low)
+
+    intervals = {}
+    for name, estimates in values.items():
+        valid = [value for value in estimates if value is not None]
+        intervals[name] = ({"lower": quantile(valid, alpha),
+                            "upper": quantile(valid, 1 - alpha),
+                            "valid_resamples": len(valid)} if valid else None)
+    return {"method": "recording_cluster_percentile_bootstrap",
+            "confidence_level": confidence, "requested_resamples": resamples,
+            "seed": seed, "independent_recordings": len(groups), "intervals": intervals,
+            "note": "approximate between-recording uncertainty; use a pre-held-out test split"}

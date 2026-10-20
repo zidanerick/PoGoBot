@@ -8,7 +8,8 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from pogobot.evaluation import evaluate_outcomes, local_path, sha256
+from pogobot.evaluation import (bootstrap_outcome_intervals, evaluate_outcomes,
+                                local_path, sha256)
 
 
 def load_episode_manifest(path: Path) -> dict:
@@ -62,6 +63,12 @@ def main() -> int:
     ap.add_argument("--manifest", type=Path, required=True)
     ap.add_argument("--split", choices=("validation", "test"), default="validation")
     ap.add_argument("--output", type=Path, required=True)
+    ap.add_argument("--bootstrap-samples", type=int, default=2000,
+                    help="recording-cluster resamples for uncertainty intervals")
+    ap.add_argument("--confidence", type=float, default=0.95,
+                    help="percentile interval confidence level")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="deterministic bootstrap random seed")
     args = ap.parse_args()
     try:
         doc = load_episode_manifest(args.manifest)
@@ -72,8 +79,12 @@ def main() -> int:
         result.update(schema_version=1, split=args.split, predictor=doc["predictor"],
                       manifest_sha256=sha256(args.manifest),
                       evidence_frames=sum(len(row["evidence"]) for row in episodes),
+                      uncertainty=bootstrap_outcome_intervals(
+                          episodes, resamples=args.bootstrap_samples,
+                          confidence=args.confidence, seed=args.seed),
                       limitations=["one vote per reviewed interaction, not per frame",
                                    "unknown predictions are abstentions",
+                                   "intervals resample whole recordings to account for within-recording correlation",
                                    "metrics are meaningful only if test recordings were held out before tuning"])
         args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n")
         print(json.dumps(result, indent=2, allow_nan=False))
