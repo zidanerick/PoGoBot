@@ -111,3 +111,63 @@ def test_replay_and_unit_default_never_query_a_device():
     assert isinstance(r.device_service, NullDeviceService)
     r._refresh_foreground(1.0, False)
     assert r.ctx.app_foreground is Tristate.UNKNOWN
+
+
+def test_slow_account_tree_query_does_not_block_recovery_ticks():
+    from threading import Event
+    from time import monotonic, sleep
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+
+    entered, release = Event(), Event()
+    expected = AccountView(available=True, panel_open=True)
+
+    class SlowReader:
+        def read(self):
+            entered.set()
+            release.wait(1)
+            return expected
+
+    r = make_runner()
+    r.ctx.state = BotState.RECOVERING
+    r.tree_reader = AsyncUiTreeReader(SlowReader())
+    started = monotonic()
+    r._refresh_accounts(100.0)
+    assert monotonic() - started < 0.1
+    assert entered.wait(0.5)
+    assert r.ctx.accounts is None
+
+    release.set()
+    for _ in range(100):
+        if not r.tree_reader._running:
+            break
+        sleep(0.005)
+    r._refresh_accounts(100.1)
+    assert r.ctx.accounts is expected
+    r.tree_reader.close()
+
+
+def test_recovery_gesture_invalidates_a_completed_but_unconsumed_tree_snapshot():
+    from time import sleep
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+
+    expected = AccountView(available=True, panel_open=True)
+
+    class Reader:
+        def read(self):
+            return expected
+
+    r = make_runner()
+    r.ctx.state = BotState.RECOVERING
+    r.tree_reader = AsyncUiTreeReader(Reader())
+    r._refresh_accounts(100.0)
+    for _ in range(100):
+        if not r.tree_reader._running:
+            break
+        sleep(0.005)
+    assert r.tree_reader._result is expected
+
+    r.apply([Tap(0.2, 0.2, "close recovery panel",
+                 budget="recover_panel_close")], obs())
+    assert r.tree_reader.poll() is None
+    assert r.ctx.accounts is None
+    r.tree_reader.close()
