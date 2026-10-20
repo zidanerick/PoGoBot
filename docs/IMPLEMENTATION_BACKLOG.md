@@ -14,16 +14,16 @@ Source inspected for this plan: `frames.py`, `observation.py`, `effects.py`, `ac
 
 ### Ownership
 
-| Role | Owns implementation | Shared-file rule |
+| Role | Owns implementation | Shared-file edit rule |
 |---|---|---|
-| Lead/integrator | `contracts.py`, `effects.py`, `observation.py` public fields, `Context` fields, `runner.py`, config/CLI wiring and migrations | Sole author of shared integration edits; incorporates narrow patches supplied by specialists |
-| Reliability | `actions.py`, device adapter, recovery and idle-rotation fixes | Supplies regression and handler patches to lead for shared files |
-| Perception/evaluation | `perception.py`, evidence producers, annotation/evaluation tools | Uses approved observation additions; never edits gameplay policy |
-| Gesture/calibration | New `gestures.py`, backend implementation and calibration tool | Consumes approved trajectory and action contracts; coordinates actuator changes with reliability |
-| Autoplay | New encounter/stop policy helpers, handler patches | Consumes receipts/evidence; lead wires into FSM/runner |
-| Reviewer | Offline fault/replay harness and independent review | Reports findings; does not silently modify another owner's patch |
+| Lead/integrator | `contracts.py`, public fields in `observation.py`, `effects.py`, shared `Context` fields, `runner.py`, CLI/config composition, event/accounting migrations | Sole editor of these shared integration surfaces. Accepts narrow specialist patches, resolves them, and owns the integrated commit. |
+| Reliability | `actions.py`, device adapter, recovery/rotation internals and their focused tests | Does not independently edit lead-owned shared files. Supplies a minimal patch or commit for any required `runner.py`, `Context`, FSM-dispatcher or CLI change. |
+| Perception/evaluation | `perception.py`, evidence production internals, annotation/evaluation and extraction tools | Consumes approved `FrameRef`/Evidence fields. A change to public Observation/Evidence shape is proposed to the lead before implementation. No gameplay-policy edits. |
+| Gesture/calibration | `gestures.py`, gesture backend, Java/Dex build and calibration tooling | Consumes the frozen trajectory, clock and ActionPort contracts. Does not edit `actions.py` or Runner; supplies an adapter patch for reliability/lead to integrate. |
+| Autoplay | New encounter/stop policy helpers and focused deterministic replay tests | Does not edit public Context, FSM dispatcher, Runner, contracts or event schema directly. Supplies narrow handler/policy patches to the lead for integration after the interface gate. |
+| Reviewer | Offline fault/replay harness and independent review | Reports reproducible findings and test requirements; does not edit another owner's implementation. |
 
-These are assignments, not instructions to launch agents. Start lead and reliability work first. Later allow at most two implementation branches at once with disjoint ownership. Shared interface changes require a contract revision in this file before dependent branches change them.
+These are ownership boundaries, not instructions to launch agents. One owner edits each shared file at a time. Specialists keep changes in their owned files and submit narrow patches when integration surfaces are needed; the lead applies those patches on the integration branch. No parallel branch may redefine a public clock, identity, receipt or evidence field.
 
 ## Contract v1.1
 
@@ -241,7 +241,7 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 ## Current PR reconciliation and merge gates
 
-The PRs are separate proposals against main at `9795280ec52b67cde316c45aa531e64c39ddd9b8`. Merge order is gated by the contract and test criteria below; PR state labels and author-reported counts do not substitute for acceptance.
+The PR heads checked for this plan are #1 `5d92fc5ea8a994bc7d80415fe3f94bc62ef7b05d`, #2 `a7fb3b5adea9f7619f6e9380fa1b1935ea1e410a`, #3 `0054eb2d95f5b043fec2d2db763a0a8d348cc648`, and #4 `7e103ec4d4c57f057ca31c97f70de1221005189f`. All target main at `9795280ec52b67cde316c45aa531e64c39ddd9b8`; this plan is proposed and no branch is merged. Merge gates below apply to those exact heads and must be rechecked if a head changes.
 
 | PR | Scope and dependency | Exact merge acceptance | Required tests/evidence |
 |---|---|---|---|
@@ -254,16 +254,32 @@ Independent review found the gesture D8 input omission, an initial-UNKNOWN input
 
 ### Proposed branch order
 
-1. **#1 contract v1.1**: merge only after this contract revision and review resolution.
-2. **#3 T01/T02 runtime**: rebase/continue after #1. Complete the dual clock, capture identity, UNKNOWN input barrier and public-path recovery/rotation tests.
-3. **T03 action lifecycle PR (not open yet)**: implement ActionPort, Dispatch, cancellation generations and feedback against the agreed FrameRef/MonotonicSeconds contracts. It is the merge prerequisite for event migration and gesture transport.
-4. **T04 event migration PR (not open yet)**: v2 action/outcome accounting after T03.
-5. **Parallel after T03**: split #4 into detector-only T05 (depends on T01; may prepare after #1 but merge after T01) and outcome-evidence T07 (depends on T03 plus T05); align #2 pure planner/transport into T06 (T03 required for transport; planner can be reviewed in isolation but must not define a second clock/identity contract).
-6. **T08 autoplay PR (not open yet)**: only after T03, T04, T06 and T07.
-7. **T09 stop/restock PR (not open yet)**: after T08.
+This is a dependency order, not an instruction to merge now. Keep PR #1 as the proposed contract source. Before implementation branches consume it, reviewers and owners must accept the API and semantics in the interface-freeze gate below.
+
+1. **#1 contract v1.1 at `5d92fc5`**: approve the shared API and this ownership/order plan. No runtime code is included.
+2. **#3 Runtime at `0054eb2`**: rebase/continue from the accepted #1 contract. This branch supplies T01/T02 work. It is not ready to pass until all runtime acceptance tests below pass, including the current home-favorite/async-reader finding.
+3. **T03 ActionPort PR, not open**: integrate the request/receipt lifecycle, cancellation generations, Dispatch, and runner feedback. #2 transport and #4 T07 outcome linkage wait for this.
+4. **T04 event migration PR, not open**: migrate persisted events and accounting on top of T03. T08 waits for this.
+5. **Parallel after T03, with disjoint ownership**:
+   - **#2 Gesture at `a7fb3b5` / T06**: pure planner can be reviewed against #1 independently; transport adapter waits for T03 and must use its ActionPort, FrameRef and cancellation generation.
+   - **#4 Perception at `7e103ec` / T05 + T07**: split before merge. T05 detector/evaluation data integrity depends on #1 and T01; it can be prepared after #1 and merges after T01. T07 runtime-linked outcome evidence depends on T03 and T05.
+6. **T08 Autoplay PR, not open**: only after T03, T04, T06 and T07 have passed their gates and the interface-freeze gate is accepted.
+7. **T09 stop/restock PR, not open**: after T08.
 8. **T10 fault/replay and supervised milestone**: after T09. No automated live release before this gate.
 
-No Autoplay PR is open in this snapshot. Its first implementation branch must consume the final action/evidence/provider APIs and must not define a parallel encounter clock, frame identity or action receipt.
+No Autoplay PR is open at these heads. Autoplay may develop isolated policy tests against frozen interfaces, but its implementation branch must not redefine clock, frame identity, action receipts, evidence, or event schemas.
+
+### Autoplay interface-freeze gate
+
+Before Autoplay implements encounter or stop policy, the lead, Runtime, Gesture, Perception and Autoplay owners must accept these interfaces and semantics in review. Acceptance means the signatures and invariants in Contract v1.1 are stable; implementation dependencies below must also be merged before production integration.
+
+| Interface | Required agreement before Autoplay codes against it | Implementation gate |
+|---|---|---|
+| Clock and capture identity | `MonotonicSeconds` is physical and advances during pause; `ActiveSeconds` freezes during pause. `FrameRef(run_id, capture_epoch, seq, captured_mono_s)` is immutable, assigned at capture, and copied unchanged through Observation/Evidence/ActionRequest/ActionEvent. Missing, stale, or prior-epoch identity fails closed. | #1 contract review, then #3/T01 tests. |
+| Action lifecycle | Exact ActionRequest/Submission/ActionEvent/ActionPort signatures; one terminal receipt per action ID; ACCEPTED is not EXECUTED; uncertainty is explicit; one outstanding gameplay action per episode; generation invalidation and serialized start-boundary rules; Dispatch applies dependent effects only after acceptance. | T03 implementation and cancellation/fault tests. |
+| Outcome evidence | Evidence carries the originating FrameRef; GameOutcome identifies episode, evidence level and source action; only same-run/current-epoch post-action or explicitly independent evidence resolves an outcome; missing/conflicting evidence resolves UNKNOWN. Perception emits facts, Runner associates episode. | #4 T07 after T03 and T05. |
+| Event/accounting schema | Physical ordering uses `at_mono_s`, optional gameplay time is `at_active_s`; simulated, accepted, executed, uncertain and outcome events stay distinct; IDs deduplicate and legacy data is labelled. | T04 migration and round-trip/deduplication tests. |
+| Gesture/provider inputs | Trajectory/calibration are pure values; GestureExecutor receives the shared Clock and T03 cancellation/action context; pointer release and uncertainty are specified. Capability freshness uses `checked_mono_s`; unknown/unsupported provider state cannot authorize a dependent feature. | #2/T06 adapter tests; provider contract implemented with T08. |
 
 ## Ordered tickets
 
