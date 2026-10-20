@@ -15,7 +15,7 @@ import pytest
 
 from pogobot import runner as runner_mod
 from pogobot import tui
-from pogobot.accounts import AccountView, FakeTreeReader, UiTreeReader
+from pogobot.accounts import AccountView, AsyncUiTreeReader, FakeTreeReader, UiTreeReader
 from pogobot.cli import build_parser, prepare_accounts
 from pogobot.config import DEFAULT
 from pogobot.effects import Tap
@@ -29,6 +29,7 @@ TARGETS = {
     "Runner": runner_mod.Runner.__init__,
     "SessionStats": SessionStats.__init__,
     "UiTreeReader": UiTreeReader.__init__,
+    "AsyncUiTreeReader": AsyncUiTreeReader.__init__,
 }
 
 
@@ -223,8 +224,8 @@ def test_a_run_with_no_switch_trigger_still_gets_a_reader_for_the_preflight():
 
 def test_no_reader_is_made_when_the_preflight_is_off_too():
     """Tied to the preflight, not handed out unconditionally: a reader this run will never
-    look at buys nothing, and `_refresh_accounts` would start paying ~3s of blocking dump
-    per RECOVERING visit for a view nothing consumes."""
+    look at buys nothing, and `_refresh_accounts` would otherwise keep scheduling device
+    queries in RECOVERING for a view nothing consumes."""
     (reader, _, _), made, act = _prepare(DEFAULT.scaled(preflight=False))
     assert reader is None and made == []
 
