@@ -34,6 +34,8 @@ Types live in proposed `pogobot/contracts.py` unless specified otherwise. Frozen
 All time values use one of two explicitly named domains. The type wrappers and suffixes are part of the contract, not optional naming style.
 
 ```python
+from typing import NewType, Protocol
+
 MonotonicSeconds = NewType("MonotonicSeconds", float)
 ActiveSeconds = NewType("ActiveSeconds", float)
 
@@ -267,13 +269,13 @@ Dependencies are merge prerequisites. Each ticket is a separate bounded PR with 
 
 | ID | Owner | Deliverable | Depends on |
 |---|---|---|---|
-| T01 | Lead + reliability | Hermetic runtime seam and baseline CI | This contract review |
+| T01 | Lead + reliability | Hermetic runtime seam, dual-domain clock, capture identity and baseline CI | Contract v1.1 review |
 | T02 | Reliability, lead integrates | Foreground escalation and idle rotation fixes, F1/F2 | T01 |
 | T03 | Reliability, lead integrates | Action lifecycle, cancellation and conditional effects, F3/F4 | T01, T02 |
 | T04 | Lead | V2 event accounting, legacy migration and consumers | T03 |
-| T05 | Perception/evaluation | Reviewed data gate, class-aware matcher and outcome collection spec, F8/F9 | T01; approved Evidence types from T03 |
-| T06 | Gesture + reliability | Pure planner, backend feasibility and device profile | T03 |
-| T07 | Perception, lead integrates | Outcome evidence and stable temporal perception, F5/F7/F11 | T05 |
+| T05 | Perception/evaluation | Reviewed detector data gate, class-aware matcher and collection spec, F8/F9 | Contract v1.1; T01 |
+| T06 | Gesture + reliability | Pure planner, backend feasibility and device profile | Contract v1.1; T03 for transport |
+| T07 | Perception, lead integrates | Runtime-linked outcome evidence and stable temporal perception, F5/F7/F11 | T03; T05 |
 | T08 | Autoplay, lead integrates | Provider capabilities and closed-loop encounter | T03, T04, T06, T07 |
 | T09 | Autoplay, lead integrates | Confirmed stop loop and bounded restock integration | T08 |
 | T10 | Reviewer + lead | Fault/replay milestone review and supervised comparison | T09 |
@@ -284,10 +286,12 @@ Scope: add Clock/DeviceServices seams, live cached foreground polling and determ
 
 Acceptance:
 
-1. Construct/run/close Runner with fake source, perceptor, action port and device services while subprocess and network access are blocked. Exercise pause/resume and replay with zero external calls.
-2. Foreground timeout returns UNKNOWN; confirmed other app returns FALSE; stale snapshots expire. Frame loop does not wait on the slow query. Unknown does not authorize gameplay input.
-3. Replay time deterministically advances all deadlines. Repeating the same scenario produces identical decisions/events.
-4. Run `python -m pytest tests -q` and report exact failures/skips. Missing packages/corpora are explicit capabilities in split jobs, never hidden blanket skips. Record the new baseline rather than copying the audit's counts.
+
+1. Through `fsm.step`, exhausted foreground attempts plus expired RECOVERING time yield the permitted restart/halt escalation. No Tap/Swipe/Back/Pinch is emitted when foreground is FALSE or UNKNOWN; a positive game foreground observation is required before screen input resumes.
+2. Through Runner, consecutive fresh confirmed-map frames with no targets eventually request rotation. Repeated map timestamps do not postpone it indefinitely.
+3. Reject a rotation at admission: spatial memory and completed-rotation bookkeeping stay unchanged. Successful admission starts a bounded wait, rather than immediate repeated requests.
+4. Acquiring a target, leaving map, capture reset and pause reset the idle interval. Recovery still uses last_map_ts and preserves existing switch/restart grace periods.
+5. Use fake dual-domain time at threshold boundaries, including paused intervals and UNKNOWN-to-TRUE foreground recovery. Retain bounded attempt and terminal halt tests. Regressions fail on pre-fix code and pass after the narrow fixes.
 
 Likely files: new contracts/device adapter, device.py, runner.py, CLI composition, tests and CI workflow. Acceptance covers F10; recovery algorithm changes belong to T02.
 
@@ -323,9 +327,9 @@ Likely files: contracts.py, effects.py, actions.py, Context, runner.py and fault
 ### Later-ticket acceptance gates
 
 * T04: persisted v1 examples survive round trip; repeated v2 events count once; failed/simulated throws never count as executed; unknown catches/rewards stay unknown; historical dashboards clearly mark legacy data.
-* T05: explicit class maps and one-to-one matching penalize duplicates, wrong classes and negatives. CPU evaluation is supported. Per-sample approvals bind image/label hashes; reject changed/unapproved data and recording/session split leakage. Deliver a data-needed manifest where examples are missing.
+* T05: explicit class maps and one-to-one matching penalize duplicates, wrong classes and negatives. CPU evaluation is supported. Per-sample approvals bind image/label hashes; reject changed/unapproved data and recording/session split leakage across repeated promotions, including when an intermediate manifest omits a held-out recording. Require matching collision-checked image/label stems in exported YOLO pairs. Deliver a data-needed manifest where examples are missing.
 * T06: planner validates finite coordinates, duration, ordering and usable bounds; fixed seed is reproducible. Fake backend verifies continuous contact and release cleanup. Real backend support remains unconfirmed until device tests record actual emitted input/timing. No automatic fallback that silently changes gesture meaning.
-* T07: full stabilization warm-up, sequence discontinuities and contradictory evidence are tested. Held-out session-grouped outcome metrics include sample counts/confusion and missing classes. No new weights promoted using recall alone. No required outcome data means T08 is blocked from live release, even if synthetic tests pass.
+* T07: full stabilization warm-up, FrameRef/capture-epoch discontinuities and contradictory evidence are tested. Every runtime Evidence carries the capture-stamped FrameRef; old asynchronous results cannot be restamped into a new epoch. Evidence extraction refuses existing outputs, stages files in an exclusive per-extraction directory and never overwrites/deletes files it did not create. Held-out session-grouped outcome metrics include sample counts/confusion and missing classes. No new weights promoted using recall alone. No required outcome data means T08 is blocked from live release, even if synthetic tests pass.
 * T08: phases READY -> AIMING -> ACTION_PENDING -> LAUNCH_PENDING -> RESULT_PENDING -> resolved/unknown, with explicit bounded failure exits. One outstanding throw per episode; EXECUTED without launch waits/revalidates. Breakout requires new readiness before retry. Out-of-balls needs direct evidence; unknown does not trigger restock. Annotated replay covers catch, flee, breakout, attack, no-balls and uncertainty.
 * T09: confirmed disc visible -> supported spin -> await reward -> exit; visits never count as rewards. Assisted mode requires fresh capability evidence. Stop retries and restock are bounded, with quota reservations surviving uncertain results. Standard-client behavior reports missing features honestly.
 * T10: public Runner/FSM fault scenarios cover stale frames, transport failure, cancellation, foreign/unknown foreground, exhausted restart, event replay and missing providers. Then supervised same-device sessions measure launches/requested throws, confirmed catches per active hour, balls per confirmed catch, false target taps, rewards, recovery time and interventions. Report uncertainty and test environment; no claimed improvement without measurements.
@@ -335,7 +339,7 @@ Likely files: contracts.py, effects.py, actions.py, Context, runner.py and fault
 1. Rebase on current target HEAD, inspect applicable AGENTS.md and preserve concurrent changes. One owner per shared file; specialist submits narrow diffs if their task overlaps the lead.
 2. PR includes scope, changed public interfaces, before/after reproduction, exact checks/results, missing data and remaining phone validation. Tests exercise the public dispatcher/runner, not just private helpers.
 3. Reviewer checks cancellation ordering, receipt/outcome distinctions, dry-run isolation and schema compatibility. Offline CI must pass; corpus failures must be classified explicitly and cannot be waived for a feature relying on that corpus.
-4. Lead merges dependencies in order. At most T05 and T06 proceed in parallel after T03. T07 can follow T05 while gesture work finishes. Branches may prepare collection specs earlier but must not invent runtime interfaces.
+4. Lead merges dependencies in order. Detector-only T05 can proceed after T01; T03 gates outcome evidence (T07) and gesture transport (T06). After T03, T05/T06 may proceed in parallel with disjoint ownership; T07 follows T03 and T05. Branches may prepare collection specs earlier but must not invent runtime interfaces.
 5. No automated live release until T10's supervised gate. Keep existing assisted behavior available behind explicit capability checks during migration; select new controllers explicitly until their release evidence exists.
 
 ## First milestone and non-goals
