@@ -181,6 +181,7 @@ def evaluate_outcomes(rows: list[dict]) -> dict:
     labels = (*OUTCOMES, "unknown")
     matrix = {truth: Counter({pred: 0 for pred in labels}) for truth in OUTCOMES}
     seen_ids, groups = set(), {}
+    unresolved_truth = 0
     for row in rows:
         action_id, recording = row.get("action_id"), row.get("recording_id")
         truth, prediction = row.get("truth"), row.get("prediction")
@@ -189,15 +190,21 @@ def evaluate_outcomes(rows: list[dict]) -> dict:
         seen_ids.add(action_id)
         if not isinstance(recording, str) or not recording.strip():
             raise ValueError(f"{action_id}: recording_id required")
-        if truth not in OUTCOMES or prediction not in labels:
-            raise ValueError(f"{action_id}: invalid truth or prediction; use unknown for abstention")
+        if truth not in labels or prediction not in labels:
+            raise ValueError(f"{action_id}: invalid truth or prediction; use unknown when unresolved")
         if row.get("reviewed") is not True or not str(row.get("evidence", "")).strip():
             raise ValueError(f"{action_id}: reviewed label and evidence reference required")
-        matrix[truth][prediction] += 1
+        if truth == "unknown":
+            # The reviewer could not establish ground truth from available evidence.
+            # Keep the episode in corpus accounting, but never score it as a class.
+            unresolved_truth += 1
+        else:
+            matrix[truth][prediction] += 1
         groups[recording] = groups.get(recording, 0) + 1
     if not rows:
         raise ValueError("cannot evaluate an empty outcome set")
     n = len(rows)
+    resolved = n - unresolved_truth
     covered = sum(matrix[t][p] for t in OUTCOMES for p in OUTCOMES)
     correct = sum(matrix[t][t] for t in OUTCOMES)
     per_class = {}
@@ -208,10 +215,14 @@ def evaluate_outcomes(rows: list[dict]) -> dict:
         per_class[label] = {"support": sum(matrix[label].values()), "tp": tp, "fp": fp, "fn": fn,
                             "precision": tp / (tp + fp) if tp + fp else None,
                             "recall": tp / (tp + fn) if tp + fn else None}
-    return {"episodes": n, "recordings": len(groups), "coverage": covered / n,
+    prediction_coverage = covered / resolved if resolved else None
+    return {"episodes": n, "recordings": len(groups),
+            "truth_resolved_episodes": resolved, "unresolved_truth_episodes": unresolved_truth,
+            "truth_resolution_rate": resolved / n,
+            "coverage": prediction_coverage, "prediction_coverage": prediction_coverage,
             "covered_accuracy": correct / covered if covered else None,
-            "correct_all_episodes": correct / n,
-            "abstentions": n - covered, "confusion": {k: dict(v) for k, v in matrix.items()},
+            "accuracy_over_resolved_episodes": correct / resolved if resolved else None,
+            "abstentions": resolved - covered, "confusion": {k: dict(v) for k, v in matrix.items()},
             "per_class": per_class}
 
 
@@ -233,7 +244,7 @@ def bootstrap_outcome_intervals(rows: list[dict], *, resamples: int = 2000,
     groups: dict[str, list[dict]] = {}
     for row in rows:
         groups.setdefault(row["recording_id"], []).append(row)
-    names = ("coverage", "covered_accuracy", "correct_all_episodes")
+    names = ("coverage", "covered_accuracy", "accuracy_over_resolved_episodes")
     values = {name: [] for name in names}
     for label in OUTCOMES:
         values[f"per_class.{label}.precision"] = []
