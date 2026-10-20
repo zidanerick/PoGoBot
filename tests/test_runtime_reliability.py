@@ -6,7 +6,7 @@ import pytest
 
 from pogobot import fsm, runner as R
 from pogobot.config import DEFAULT
-from pogobot.effects import BotState, Back, Tap, Swipe, RestartApp, Halt
+from pogobot.effects import BotState, Back, Tap, Swipe, RestartApp, Halt, ForegroundApp
 from pogobot.frames import Frame
 from pogobot.observation import Tristate
 from tests.factories import obs
@@ -29,6 +29,24 @@ def test_foreign_foreground_refuses_interrupt_gestures_between_raise_attempts():
     c.last_action['foreground'] = 100
     assert not any(isinstance(e, (Back, Tap, Swipe))
                    for e in fsm.step(obs(screen='Menu', keyboard=Tristate.TRUE), c))
+
+
+def test_pending_foreground_poll_keeps_known_foreign_screen_blocked():
+    class PendingService:
+        def read(self, package): return Tristate.UNKNOWN
+        def invalidate(self): pass
+        def close(self): pass
+
+    r = make_runner(device_service=PendingService())
+    r.ctx.state = BotState.RECOVERING
+    r.ctx.now = 100.0
+    r.ctx.app_foreground = Tristate.FALSE
+    raise_app = ForegroundApp(DEFAULT.app_package, DEFAULT.app_activity, "raise")
+    r.apply([raise_app], obs(screen="Menu"))
+    r._refresh_foreground(101.0, False)
+    assert r.ctx.app_foreground is Tristate.FALSE
+    effects = fsm.step(obs(screen="Menu", keyboard=Tristate.TRUE, ts=101.0), r.ctx)
+    assert not any(isinstance(e, (Back, Tap, Swipe)) for e in effects)
 
 
 def test_empty_map_rotates_through_runner_without_aging_recovery_clock(monkeypatch):
@@ -58,6 +76,30 @@ def test_empty_map_rotates_through_runner_without_aging_recovery_clock(monkeypat
     rotations = [e for e in r.actuator.applied if isinstance(e, Swipe) and e.budget == 'rotate']
     assert 2 <= len(rotations) <= 4
     assert r.ctx.last_map_ts >= clock[0] - 1
+
+
+@pytest.mark.parametrize("accepted", [False, True])
+def test_rotation_clears_spatial_memory_only_after_accepted_swipe(accepted):
+    timings = replace(DEFAULT.timings, scanning_idle_rotate=1, rotate_camera=0)
+    cfg = DEFAULT.scaled(auto_rotate=True, timings=timings)
+    r = make_runner(cfg)
+    r.ctx.state = BotState.SCANNING
+    r.ctx.now = 100.0
+    r.ctx.state_since = 0.0
+    r.ctx.last_scan_progress_ts = 0.0
+    r.ctx.cooldowns.append((0.4, 0.5, 200.0))
+    if not accepted:
+        r.actuator.apply = lambda *_args, **_kwargs: False
+    observation = obs(ts=100.0)
+    effects = fsm.step(observation, r.ctx)
+    assert any(isinstance(e, Swipe) and e.budget == "rotate" for e in effects)
+    r.apply(effects, observation)
+    if accepted:
+        assert r.ctx.cooldowns == []
+        assert r.ctx.last_scan_progress_ts == 100.0
+    else:
+        assert r.ctx.cooldowns == [(0.4, 0.5, 200.0)]
+        assert r.ctx.last_scan_progress_ts == 0.0
 
 
 def test_blocked_foreground_query_never_blocks_the_runner_read():
