@@ -744,6 +744,7 @@ class AsyncHomeNavigator:
         self.phase = "initial"
         self.waiting_for_view = True
         self.finished = False
+        self.cancelled = False
         self.result: Optional[str] = None
         self.failure: Optional[str] = None
         self._jump_name: Optional[str] = None
@@ -777,6 +778,21 @@ class AsyncHomeNavigator:
             self.finished = False
             self._tap_and_wait(*view.star_norm,
                                "home: close the PGSharp shortcut menu", "failure_complete")
+
+    def invalidate_pending_read(self) -> None:
+        """Discard snapshots across pause or another runner-owned interruption."""
+        if self.finished:
+            return
+        self.tree_reader.invalidate()
+        self.waiting_for_view = True
+
+    def cancel(self) -> None:
+        """Stop navigation during runner shutdown without reporting a failure."""
+        if not self.finished:
+            self.tree_reader.invalidate()
+        self.cancelled = True
+        self.finished = True
+        self.result = None
 
     def _select_home(self, view: AccountView) -> None:
         wanted = self.home.casefold()
@@ -820,10 +836,14 @@ class AsyncHomeNavigator:
             else:
                 self._fail("PGSharp's Favorites page did not open", view)
         elif self.phase == "after_jump":
-            if view.available and view.close_norm is not None:
+            if not view.available:
+                self._fail("Could not verify the saved-location tap")
+            elif view.close_norm is not None:
                 self._tap_and_wait(*view.close_norm, "home: close the PGSharp page",
                                    "after_page_close")
-            elif view.available and view.favorites_menu_norm is not None \
+            elif view.favorites_open:
+                self._fail("PGSharp's Favorites page has no located close control", view)
+            elif view.favorites_menu_norm is not None \
                     and view.star_norm is not None:
                 self._tap_and_wait(*view.star_norm,
                                    "home: close the PGSharp shortcut menu", "complete")
@@ -831,7 +851,11 @@ class AsyncHomeNavigator:
                 self.result = self._jump_name
                 self.finished = True
         elif self.phase == "after_page_close":
-            if view.available and view.favorites_menu_norm is not None \
+            if not view.available:
+                self._fail("Could not verify the PGSharp page closed")
+            elif view.favorites_open or view.close_norm is not None:
+                self._fail("The PGSharp Favorites page is still open", view)
+            elif view.favorites_menu_norm is not None \
                     and view.star_norm is not None:
                 self._tap_and_wait(*view.star_norm,
                                    "home: close the PGSharp shortcut menu", "complete")
@@ -839,8 +863,14 @@ class AsyncHomeNavigator:
                 self.result = self._jump_name
                 self.finished = True
         elif self.phase == "complete":
-            self.result = self._jump_name
-            self.finished = True
+            if not view.available:
+                self._fail("Could not verify the PGSharp shortcut menu closed")
+            elif view.favorites_open or view.close_norm is not None \
+                    or view.favorites_menu_norm is not None:
+                self._fail("A PGSharp overlay remains open", view)
+            else:
+                self.result = self._jump_name
+                self.finished = True
         elif self.phase == "failure_cleanup":
             if view.available and view.favorites_menu_norm is not None \
                     and view.star_norm is not None:
@@ -854,6 +884,8 @@ class AsyncHomeNavigator:
 
     def advance(self) -> Optional[bool]:
         """Return None while pending, True on success, or False on failure."""
+        if self.cancelled:
+            return False
         if self.finished:
             return self.result is not None
         now = time.monotonic()

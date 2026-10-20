@@ -20,7 +20,7 @@ from pathlib import Path
 import pytest
 
 from pogobot import accounts
-from pogobot.accounts import FavoriteRow, parse_dump, teleport_home
+from pogobot.accounts import AccountView, FavoriteRow, parse_dump, teleport_home
 from pogobot.effects import Tap
 
 FIX = Path("tests/fixtures/uiautomator")
@@ -44,6 +44,29 @@ class _Reader:
         return _view(name) if isinstance(name, str) else name
 
 
+class _AsyncReader:
+    """A deterministic request/poll reader for the navigator's state transitions."""
+
+    def __init__(self, *views):
+        self.views = list(views)
+        self.requested = False
+        self.invalidations = 0
+
+    def invalidate(self):
+        self.invalidations += 1
+        self.requested = False
+
+    def request(self):
+        self.requested = True
+        return True
+
+    def poll(self):
+        if not self.requested or not self.views:
+            return None
+        self.requested = False
+        return self.views.pop(0)
+
+
 class _Act:
     def __init__(self):
         self.taps = []
@@ -55,6 +78,12 @@ class _Act:
 
     def healthy(self):
         return True
+
+    def stats(self):
+        return {}
+
+    def close(self):
+        pass
 
 
 @pytest.fixture(autouse=True)
@@ -316,7 +345,7 @@ def test_account_switch_with_async_reader_returns_to_configured_home():
     rec = _Rec()
     reader = AsyncUiTreeReader(_Reader(
         "pgsharp_shortcut_menu", "pgsharp_favorites", "pgsharp_favorites",
-        "pgsharp_shortcut_menu"))
+        "pgsharp_shortcut_menu", AccountView(available=True)))
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=rec)
     r.actuator = _Act()
@@ -376,6 +405,236 @@ def test_async_home_navigation_failure_reaches_notifier():
     assert rec.problems[0][0] == "Could not return home"
     assert "Could not read" in rec.problems[0][1]
     reader.close()
+
+
+def test_rejected_favorite_tap_cannot_report_success():
+    from pogobot.accounts import AsyncHomeNavigator
+
+    class _Reject:
+        def __init__(self):
+            self.taps = []
+
+        def apply(self, effect, now=None):
+            self.taps.append(effect)
+            return False
+
+    act = _Reject()
+    nav = AsyncHomeNavigator(_AsyncReader(_view("pgsharp_favorites")), act,
+                             "Home Location", settle=0)
+    assert nav.advance() is False
+    assert nav.result is None
+    assert nav.failure and "Could not dispatch home: teleport" in nav.failure
+    assert len(act.taps) == 1
+
+
+def test_unavailable_tree_after_favorite_tap_is_not_success():
+    from pogobot.accounts import AccountView, AsyncHomeNavigator
+
+    act = _Act()
+    nav = AsyncHomeNavigator(
+        _AsyncReader(_view("pgsharp_favorites"), AccountView(available=False)),
+        act, "Home Location", settle=0)
+    assert nav.advance() is None  # Accepted row tap, no navigation result yet.
+    assert nav.advance() is False
+    assert nav.result is None
+    assert nav.failure == "Could not verify the saved-location tap"
+
+
+def test_unavailable_tree_after_page_close_is_not_success():
+    from pogobot.accounts import AccountView, AsyncHomeNavigator
+
+    act = _Act()
+    nav = AsyncHomeNavigator(
+        _AsyncReader(_view("pgsharp_favorites"), _view("pgsharp_favorites"),
+                     AccountView(available=False)),
+        act, "Home Location", settle=0)
+    assert nav.advance() is None  # Favorite tapped.
+    assert nav.advance() is None  # Page close tapped.
+    assert nav.advance() is False
+    assert nav.result is None
+    assert nav.failure == "Could not verify the PGSharp page closed"
+
+
+def test_missing_favorite_cleans_up_page_and_menu_then_reports_failure():
+    from pogobot.accounts import AccountView, AsyncHomeNavigator
+
+    act = _Act()
+    nav = AsyncHomeNavigator(
+        _AsyncReader(_view("pgsharp_favorites"), _view("pgsharp_shortcut_menu"),
+                     AccountView(available=True)),
+        act, "Atlantis", settle=0)
+    assert nav.advance() is None  # Missing row; close the Favorites page.
+    assert nav.advance() is None  # Close the shortcut menu.
+    assert nav.advance() is False
+    assert nav.result is None
+    reasons = [reason for _, _, reason in act.taps]
+    assert reasons == ["home: close the PGSharp page",
+                       "home: close the PGSharp shortcut menu"]
+
+
+def test_async_home_navigation_timeout_reports_failure(monkeypatch):
+    from pogobot.accounts import AsyncHomeNavigator
+
+    clock = [50.0]
+    monkeypatch.setattr(accounts.time, "monotonic", lambda: clock[0])
+    nav = AsyncHomeNavigator(_AsyncReader(), _Act(), "Home Location", settle=0)
+    assert nav.advance() is None
+    clock[0] += nav.TOTAL_TIMEOUT
+    assert nav.advance() is False
+    assert nav.result is None
+    assert nav.failure == "Timed out waiting for the PGSharp overlay"
+
+
+def test_async_home_navigation_discards_stale_snapshot_after_favorite_tap():
+    from threading import Event
+    from time import monotonic, sleep
+    from pogobot.accounts import AccountView, AsyncHomeNavigator, AsyncUiTreeReader
+
+    entered, release = Event(), Event()
+
+    class _SlowThenUnavailable:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                return _view("pgsharp_favorites")
+            if self.reads == 2:
+                entered.set()
+                release.wait(1)
+                return _view("pgsharp_favorites")
+            return AccountView(available=False)
+
+    underlying = _SlowThenUnavailable()
+    reader = AsyncUiTreeReader(underlying)
+    act = _Act()
+    nav = AsyncHomeNavigator(reader, act, "Home Location", settle=0)
+    deadline = monotonic() + 1
+    while reader._running and monotonic() < deadline:
+        sleep(0.002)
+    assert reader.request(), "start a second, deliberately stale snapshot"
+    assert entered.wait(0.5)
+    assert nav.advance() is None  # Consume the first view and tap the favorite.
+    assert [reason for _, _, reason in act.taps] == [
+        "home: teleport to Home Location"]
+    release.set()
+
+    deadline = monotonic() + 1
+    while reader._running and monotonic() < deadline:
+        sleep(0.002)
+    assert reader.poll() is None, "the in-flight pre-tap snapshot must be discarded"
+    deadline = monotonic() + 1
+    while not nav.finished and monotonic() < deadline:
+        nav.advance()
+        sleep(0.002)
+    assert nav.advance() is False
+    assert nav.result is None
+    assert [reason for _, _, reason in act.taps] == [
+        "home: teleport to Home Location"], "stale state must not authorize cleanup taps"
+    reader.close()
+
+
+def test_pause_invalidates_home_snapshot_and_resume_uses_fresh_tree():
+    from dataclasses import replace
+    from threading import Event
+    from time import monotonic, sleep
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+
+    entered, release = Event(), Event()
+
+    class _SlowThenUnavailable:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                entered.set()
+                release.wait(1)
+                return _view("pgsharp_favorites")
+            return AccountView(available=False)
+
+    class _Rec:
+        enabled = False
+
+        def __init__(self): self.problems = []
+        def problem(self, title, detail=""): self.problems.append((title, detail))
+        def started(self, **k): pass
+        def finished(self, **k): pass
+        def halted(self, *a, **k): pass
+        def switched(self, n): pass
+        def close(self, timeout=5.0): pass
+
+    reader = AsyncUiTreeReader(_SlowThenUnavailable())
+    rec = _Rec()
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader, notifier=rec)
+    r.actuator = _Act()
+    r._on_switch_confirmed("Traveller")
+    assert entered.wait(0.5)
+    r.toggle_pause()
+    assert r._sync_pause(100.0)
+    release.set()
+    deadline = monotonic() + 1
+    while reader._running and monotonic() < deadline:
+        sleep(0.002)
+    assert reader.poll() is None
+    assert r.actuator.taps == []
+
+    r.toggle_pause()
+    assert not r._sync_pause(101.0)
+    deadline = monotonic() + 1
+    while r._home_navigation is not None and monotonic() < deadline:
+        r._poll_home_navigation()
+        sleep(0.002)
+    assert r._home_navigation is None
+    assert r.actuator.taps == []
+    assert len(rec.problems) == 1
+    assert "Could not read" in rec.problems[0][1]
+    reader.close()
+
+
+def test_runner_close_cancels_pending_home_navigation_without_input():
+    from dataclasses import replace
+    from threading import Event
+    from pogobot.accounts import AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+
+    entered, release = Event(), Event()
+
+    class _SlowReader:
+        def read(self):
+            entered.set()
+            release.wait(1)
+            return _view("pgsharp_favorites")
+
+    class _Rec:
+        enabled = False
+
+        def __init__(self): self.problems = []
+        def problem(self, title, detail=""): self.problems.append((title, detail))
+        def started(self, **k): pass
+        def finished(self, **k): pass
+        def halted(self, *a, **k): pass
+        def switched(self, n): pass
+        def close(self, timeout=5.0): pass
+
+    reader = AsyncUiTreeReader(_SlowReader())
+    rec = _Rec()
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader, notifier=rec)
+    r.actuator = _Act()
+    r._on_switch_confirmed("Traveller")
+    nav = r._home_navigation
+    assert entered.wait(0.5)
+    r.close()
+    release.set()
+    r._poll_home_navigation()
+    assert nav.cancelled
+    assert r.actuator.taps == []
+    assert rec.problems == []
 
 
 def test_a_ladder_that_throws_cannot_break_the_switch():

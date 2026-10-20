@@ -515,6 +515,8 @@ class Runner:
             self._paused = True
             self._paused_at = real
             self._abandon_intent("paused before the screen answered")
+            if self._home_navigation is not None:
+                self._home_navigation.invalidate_pending_read()
             log.warning("PAUSED - no taps will be sent. %s",
                         "delete the pause file to resume" if self.pause_file
                         else "send SIGUSR1 again to resume")
@@ -670,6 +672,9 @@ class Runner:
         """Advance asynchronous account-switch home navigation without waiting."""
         navigation = self._home_navigation
         if navigation is None:
+            return
+        if navigation.cancelled:
+            self._home_navigation = None
             return
         try:
             completed = navigation.advance()
@@ -1760,6 +1765,12 @@ class Runner:
         # it. `actuator.stats()` in the log line below is a live call into a component we
         # have just closed, which is exactly the kind of thing that used to.
         try:
+            if self._home_navigation is not None:
+                try:
+                    self._home_navigation.cancel()
+                    self._home_navigation = None
+                except Exception:
+                    log.exception("could not cancel pending home navigation")
             for closer in (getattr(self.source, "release", None),
                            getattr(self.actuator, "close", None),
                            getattr(self.keyboard, "stop", None),
