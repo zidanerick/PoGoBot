@@ -608,10 +608,14 @@ class Runner:
             self.ctx.app_foreground = Tristate.TRUE
             return
         try:
-            self.ctx.app_foreground = self.device_service.read(self.cfg.app_package)
+            state = self.device_service.read(self.cfg.app_package)
+            # UNKNOWN means the asynchronous query has no answer yet. Preserve a known
+            # foreign-app result until a positive game observation (the map or TRUE from
+            # the device service) clears the input barrier.
+            if state is not Tristate.UNKNOWN:
+                self.ctx.app_foreground = state
         except Exception:
             log.exception("foreground device query failed")
-            self.ctx.app_foreground = Tristate.UNKNOWN
 
     def _go_home(self) -> None:
         """Put the new account back on the spot the run was started from.
@@ -1217,6 +1221,7 @@ class Runner:
 
     def apply(self, effects: list[Effect], obs: Observation) -> None:
         """One place applies everything, so dry-run and tracing cannot be forgotten."""
+        rotation_accepted = False
         for e in effects:
             if isinstance(e, Transition):
                 if hasattr(self.tree_reader, "poll"):
@@ -1241,8 +1246,12 @@ class Runner:
             elif isinstance(e, Cooldown):
                 self.ctx.cooldowns.append((e.x, e.y, self.ctx.now + e.seconds))
             elif isinstance(e, ClearSpatialMemory):
-                self.ctx.cooldowns.clear()
-                log.info("cleared spatial memory: %s", e.reason)
+                if rotation_accepted:
+                    self.ctx.cooldowns.clear()
+                    log.info("cleared spatial memory: %s", e.reason)
+                    rotation_accepted = False
+                else:
+                    log.info("kept spatial memory because the camera rotation was not accepted")
             elif isinstance(e, Note):
                 log.log(logging.WARNING if e.level == "warn" else logging.INFO, e.text)
             elif isinstance(e, Halt):
@@ -1251,6 +1260,7 @@ class Runner:
                 self.enter_state(BotState.HALTED, IntentOutcome.CARRIED, e.reason)
             elif is_actuation(e):
                 if self.actuator.apply(e, now=self.ctx.now):
+                    rotation_accepted = isinstance(e, Swipe) and e.budget == "rotate"
                     budget = getattr(e, "budget", "tap")
                     if budget in ("tap", "rotate"):
                         self.ctx.last_scan_progress_ts = self.ctx.now
