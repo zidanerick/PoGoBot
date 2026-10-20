@@ -41,9 +41,36 @@ def test_outcomes_count_one_per_action_and_unknown_as_abstention():
     assert result["episodes"] == 3 and result["recordings"] == 2
     assert result["coverage"] == pytest.approx(2 / 3)
     assert result["covered_accuracy"] == .5
-    assert result["correct_all_episodes"] == pytest.approx(1 / 3)
+    assert result["accuracy_over_resolved_episodes"] == pytest.approx(1 / 3)
     assert result["abstentions"] == 1
     assert result["confusion"]["fled"]["unknown"] == 1
+
+
+def test_unknown_reviewed_truth_is_retained_but_excluded_from_accuracy():
+    rows = [
+        {"action_id": "known", "recording_id": "a", "truth": "caught", "prediction": "unknown", "reviewed": True, "evidence": "a/1.png"},
+        {"action_id": "unresolved", "recording_id": "a", "truth": "unknown", "prediction": "caught", "reviewed": True, "evidence": "a/2.png"},
+    ]
+    result = evaluate_outcomes(rows)
+    assert result["episodes"] == 2
+    assert result["truth_resolved_episodes"] == 1
+    assert result["unresolved_truth_episodes"] == 1
+    assert result["truth_resolution_rate"] == .5
+    assert result["prediction_coverage"] == 0
+    assert result["abstentions"] == 1
+    assert result["covered_accuracy"] is None
+    assert result["accuracy_over_resolved_episodes"] == 0
+    assert sum(result["confusion"]["caught"].values()) == 1
+
+
+def test_all_unknown_reviewed_truth_does_not_create_accuracy_claim():
+    row = {"action_id": "unresolved", "recording_id": "a", "truth": "unknown",
+           "prediction": "caught", "reviewed": True, "evidence": "a/1.png"}
+    result = evaluate_outcomes([row])
+    assert result["truth_resolved_episodes"] == 0
+    assert result["prediction_coverage"] is None
+    assert result["covered_accuracy"] is None
+    assert result["accuracy_over_resolved_episodes"] is None
 
 
 def test_outcome_intervals_resample_recordings_deterministically_and_mark_small_samples():
@@ -58,7 +85,7 @@ def test_outcome_intervals_resample_recordings_deterministically_and_mark_small_
     assert first == second
     assert first["method"] == "recording_cluster_percentile_bootstrap"
     assert first["independent_recordings"] == 3
-    interval = first["intervals"]["correct_all_episodes"]
+    interval = first["intervals"]["accuracy_over_resolved_episodes"]
     assert 0 <= interval["lower"] <= interval["upper"] <= 1
     single = bootstrap_outcome_intervals(rows[:2], resamples=20)
     assert single["intervals"] is None
@@ -195,7 +222,8 @@ def make_outcome_manifest(root: Path, *, split="validation"):
     frame = root / "result.png"
     frame.write_bytes(b"result frame")
     import hashlib
-    doc = {"schema_version": 1, "predictor": {"name": "screen-state", "version": "candidate-1", "artifact_sha256": "a" * 64},
+    doc = {"schema_version": 1, "recording_splits": {"session-1": split},
+           "predictor": {"name": "screen-state", "version": "candidate-1", "artifact_sha256": "a" * 64},
            "episodes": [{"action_id": "enc-1", "recording_id": "session-1", "split": split,
                          "truth": "caught", "prediction": "caught", "reviewed": True,
                          "reviewer": "r", "evidence": [{"path": "result.png",
@@ -223,6 +251,31 @@ def test_outcome_manifest_requires_predictor_and_review(tmp_path):
     doc["episodes"][0]["reviewed"] = False
     path.write_text(json.dumps(doc))
     with pytest.raises(ValueError, match="human outcome review"):
+        load_manifest(path)
+
+
+def test_outcome_manifest_requires_immutable_recording_split_registry(tmp_path):
+    path, doc, _, load_manifest = make_outcome_manifest(tmp_path / "episodes")
+    doc["recording_splits"]["session-1"] = "test"
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="recording_splits disagrees"):
+        load_manifest(path)
+    doc.pop("recording_splits")
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="recording_splits must persist"):
+        load_manifest(path)
+
+
+def test_outcome_manifest_refuses_duplicate_or_escaping_evidence_paths(tmp_path):
+    path, doc, _, load_manifest = make_outcome_manifest(tmp_path / "episodes")
+    evidence = doc["episodes"][0]["evidence"]
+    evidence.append(dict(evidence[0]))
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="duplicate evidence path"):
+        load_manifest(path)
+    doc["episodes"][0]["evidence"] = [{"path": "../outside.png", "sha256": "0" * 64}]
+    path.write_text(json.dumps(doc))
+    with pytest.raises(ValueError, match="escapes"):
         load_manifest(path)
 
 
@@ -283,6 +336,7 @@ def test_video_extractor_writes_hashed_unreviewed_frames_without_cv2_install(tmp
                   interval=1, max_frames=5)
     episode = doc["episodes"][0]
     assert episode["reviewed"] is False and episode["truth"] == "unknown"
+    assert doc["recording_splits"] == {"session-a": "train"}
     assert len(episode["evidence"]) == 3
     for item in episode["evidence"]:
         frame = tmp_path / item["path"]
