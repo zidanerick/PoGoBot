@@ -1,10 +1,11 @@
 import time
+import threading
 
 import cv2
 import numpy as np
 import pytest
 
-from pogobot.capture import ReplaySource
+from pogobot.capture import ReplaySource, ScrcpySource
 from pogobot.config import DEFAULT
 from pogobot.contracts import FrameRef, MonotonicSeconds, SystemClock
 from pogobot.observation import ScreenGuess
@@ -79,6 +80,26 @@ def test_replay_reset_advances_epoch_and_restarts_sequence(tmp_path):
     assert epoch == before.frame_ref.capture_epoch + 1
     assert after.seq == 1
     assert after.frame_ref.capture_epoch == epoch
+
+
+def test_live_reset_and_reconnect_advance_epoch_and_drop_buffered_frame():
+    # Exercise the epoch lifecycle without starting scrcpy or opening a device.
+    source = ScrcpySource.__new__(ScrcpySource)
+    source._lock = threading.Lock()
+    source._capture_epoch = 0
+    source._seq = 8
+    source._latest = np.zeros((4, 4, 3), dtype=np.uint8)
+    source._latest_seq = 8
+    source._latest_ts = 12.0
+    source._latest_epoch = 0
+
+    assert source.reset() == 1
+    assert source._seq == 0 and source._latest is None
+    source._seq = 3
+    source._latest = np.zeros((4, 4, 3), dtype=np.uint8)
+    source._latest_seq = 3
+    assert source.reconnected() == 2
+    assert source._seq == 0 and source._latest is None
 
 
 def test_runner_owns_run_id_and_rejects_mismatched_production_identity(tmp_path):
