@@ -70,6 +70,28 @@ class EvidenceAdapter:
                                    confidence=None, source=source,
                                    region_xyxyn=None)
 
+    def tristate(self, *, frame: Any, observation: Any, frame_ref: Any,
+                 field_name: str, kind: str, source: str) -> Any:
+        """Copy an explicit legacy tristate fact, including UNKNOWN, to T01.
+
+        This is for an existing three-state observation field. A missing field is an
+        error; callers must not manufacture FALSE from missing evidence.
+        """
+        self._validate_identity(frame, observation, frame_ref)
+        field_name = self._text(field_name, "field_name")
+        kind = self._text(kind, "kind")
+        source = self._text(source, "source")
+        legacy_value = getattr(observation, field_name, None)
+        state = getattr(legacy_value, "name", None)
+        if state not in ("TRUE", "FALSE", "UNKNOWN"):
+            raise ValueError(f"Observation.{field_name} is not an explicit tristate")
+        value = getattr(self._tristate_type, state, None)
+        if value is None:
+            raise ValueError(f"T01 Tristate does not define {state}")
+        return self._evidence_type(frame_ref=frame_ref, kind=kind, value=value,
+                                   confidence=None, source=source,
+                                   region_xyxyn=None)
+
     def detection(self, *, frame: Any, observation: Any, frame_ref: Any,
                   detection: Any, source: str) -> Any:
         """Convert a positive legacy Detection to normalized T01 Evidence.
