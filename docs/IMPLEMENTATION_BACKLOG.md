@@ -243,9 +243,9 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 ## Current PR reconciliation and merge gates
 
-Exact PR heads rechecked before this refresh: #1 `e322afea56e89298b43385408844bbadf8d2add8`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. All are open against `main`; none is merged. Updating this plan advances PR #1; recheck its resulting head after this commit.
+Exact PR heads rechecked before this refresh: #1 `42ab896cb79897ffdad9446d193977f2e5d87274`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. All are open against `main`; none is merged. Updating this plan advances PR #1; recheck its resulting head after this commit.
 
-**PR #1 mergeability check:** current metadata for input head `e322afea56e89298b43385408844bbadf8d2add8` reports `mergeable=false`. Comparing `docs/shared-interfaces-backlog` with `main` reports 38 commits ahead, zero behind, merge base equal to `main` at `9795280ec52b67cde316c45aa531e64c39ddd9b8`, and one changed path: added `docs/IMPLEMENTATION_BACKLOG.md`. The compare exposes no conflict path or divergent base, so it does not explain the false flag. The precise cause remains unresolved. No status checks were reported. No merge was performed.
+**PR #1 mergeability check:** current metadata for input head `42ab896cb79897ffdad9446d193977f2e5d87274` reports `mergeable=false`. Comparing `docs/shared-interfaces-backlog` with `main` reports 39 commits ahead, zero behind, merge base equal to `main` at `9795280ec52b67cde316c45aa531e64c39ddd9b8`, and one changed path: added `docs/IMPLEMENTATION_BACKLOG.md`. The compare exposes no conflict path or divergent base, so it does not explain the false flag. The precise cause remains unresolved. No status checks were reported. No merge was performed.
 
 ### PR head and test-evidence recheck
 
@@ -280,7 +280,7 @@ Validation on the available staged candidate files: `python -m compileall -q pog
 
 ### Proposed branch order
 
-This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `e322afea56e89298b43385408844bbadf8d2add8`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; the current focused gate includes the notifier regression and reports 115 passed.
+This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `42ab896cb79897ffdad9446d193977f2e5d87274`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; the current focused gate includes the notifier regression and reports 115 passed.
 
 1. **Contract review (#1)**: accept v1.1 signatures and invariants; record approval. No behavior is implemented by this documentation step.
 2. **T01 shared runtime seam (Lead owns shared files; Reliability contributes device adapter)**: implement dual clocks, DeviceServices, capture-stamped FrameRef through Frame/Observation/Evidence, replay isolation and baseline CI. PR #3 adapts to these seams.
