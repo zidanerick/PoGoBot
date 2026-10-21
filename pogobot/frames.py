@@ -8,6 +8,8 @@ from typing import Optional, Protocol
 
 import numpy as np
 
+from .contracts import FrameRef
+
 
 @dataclass(frozen=True)
 class Frame:
@@ -21,6 +23,8 @@ class Frame:
     seq: int
     ts: float
     bgr: np.ndarray
+    # Optional during constructor migration; production capture paths attach this.
+    frame_ref: Optional[FrameRef] = None
 
     @property
     def height(self) -> int:
