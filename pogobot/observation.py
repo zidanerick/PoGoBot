@@ -18,6 +18,8 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Optional
 
+from .contracts import FrameRef
+
 
 class Tristate(enum.Enum):
     """A boolean that can also be 'we could not find out'."""
@@ -129,6 +131,8 @@ class Observation:
     #: field - stays exactly as it was, unlike x_button/map_ball/etc. above which are
     #: required precisely because nothing this old ever forgot to compute them.
     exit_dialog: Signal = field(default_factory=lambda: Signal(False, 0.0, 1.0))
+    #: Capture identity copied from the source Frame. Optional only for legacy fixtures.
+    frame_ref: Optional[FrameRef] = None
 
     # Measured over 235 labelled frames: the red Pokeball alone reaches 97% recall on
     # Overworld but fires on 18% of encounters (a red Poke Ball sits in the same ROI).
