@@ -133,7 +133,8 @@ def pctx(**kw):
     chain. The absence of `switch_target` is the whole point - it is what tells the shared
     phase methods which of the two runs they are in."""
     c = fsm.Context(cfg=kw.pop("cfg", Config()), state=BotState.PREFLIGHT,
-                    now=100.0, state_since=100.0)
+                    now=100.0, state_since=100.0,
+                    app_foreground=Tristate.TRUE)
     c.switch_target = None
     c.switch_phase = kw.pop("phase", fsm.PREFLIGHT_PHASES[0])
     c.accounts = kw.pop("accounts", _full_view())

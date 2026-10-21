@@ -6,6 +6,7 @@ import pytest
 from pogobot import runner as runner_mod
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, Cooldown, Halt, IntentOutcome, Swipe, Tap, Transition
+from pogobot.observation import Tristate
 from pogobot.stats import SessionStats, append_session, lifetime_line, load_lifetime
 
 
@@ -41,7 +42,9 @@ class _Src:
 
 
 def _runner():
-    return runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False)
+    runner = runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False)
+    runner.ctx.app_foreground = Tristate.TRUE
+    return runner
 
 
 def _apply(r, effects, state=None):

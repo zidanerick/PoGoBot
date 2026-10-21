@@ -110,7 +110,12 @@ class ForegroundPoller:
                 self._state = Tristate.UNKNOWN
                 self._next_at = 0.0
             self._package = package
-            if not self._running and self._clock() >= self._next_at:
+            now = self._clock()
+            if now >= self._next_at:
+                # Once the polling interval expires, the previous answer is stale. Do
+                # not keep authorizing screen input while a replacement query runs.
+                self._state = Tristate.UNKNOWN
+            if not self._running and now >= self._next_at:
                 self._start_locked()
             return self._state
 

@@ -9,11 +9,13 @@ import pytest
 from pogobot import fsm, runner as runner_mod
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, IntentOutcome, Swipe, Tap, Transition
+from pogobot.observation import Tristate
 from tests.factories import det, obs as mkobs
 
 
 def ctx(state=BotState.ENCOUNTER, now=100.0, **kw):
-    c = fsm.Context(cfg=DEFAULT, state=state, state_since=now - 1, now=now)
+    c = fsm.Context(cfg=DEFAULT, state=state, state_since=now - 1, now=now,
+                    app_foreground=Tristate.TRUE)
     for k, v in kw.items():
         setattr(c, k, v)
     return c
@@ -116,7 +118,9 @@ class _Src:
 
 
 def _runner():
-    return runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False)
+    runner = runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False)
+    runner.ctx.app_foreground = Tristate.TRUE
+    return runner
 
 
 def _exhausted_encounter(r, now):

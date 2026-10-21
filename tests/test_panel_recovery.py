@@ -45,6 +45,7 @@ from pogobot.effects import (
     Transition,
     is_actuation,
 )
+from pogobot.observation import Tristate
 from pogobot.frames import Frame
 from tests.factories import obs
 from tests.test_switch_runner import ROSTER, closed_panel, make_runner
@@ -66,7 +67,7 @@ def _open_panel(**kw) -> AccountView:
 
 def recovering(accounts=None, cfg=None, now=1_000.0, **kw) -> fsm.Context:
     c = fsm.Context(cfg=cfg or Config(), state=BotState.RECOVERING,
-                    state_since=now, now=now)
+                    state_since=now, now=now, app_foreground=Tristate.TRUE)
     c.last_map_ts = now
     c.accounts = accounts
     for k, v in kw.items():

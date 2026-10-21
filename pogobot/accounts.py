@@ -882,8 +882,13 @@ class AsyncHomeNavigator:
         elif self.phase == "failure_complete":
             self.finished = True
 
-    def advance(self) -> Optional[bool]:
-        """Return None while pending, True on success, or False on failure."""
+    def advance(self, *, allow_input: bool = True) -> Optional[bool]:
+        """Return None while pending, True on success, or False on failure.
+
+        ``allow_input`` is supplied by Runner's positive foreground check. When false,
+        invalidate any read already in flight and wait for a fresh foreground-confirmed
+        tick before consuming a tree or tapping its controls.
+        """
         if self.cancelled:
             return False
         if self.finished:
@@ -892,6 +897,10 @@ class AsyncHomeNavigator:
         if now - self.started >= self.TOTAL_TIMEOUT:
             self._fail("Timed out waiting for the PGSharp overlay")
             return False
+        if not allow_input:
+            self.tree_reader.invalidate()
+            self.waiting_for_view = True
+            return None
         if not self.waiting_for_view:
             if now < self.ready_at:
                 return None

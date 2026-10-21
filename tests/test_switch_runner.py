@@ -29,6 +29,7 @@ from pogobot.accounts import AccountView, FakeTreeReader
 from pogobot.config import DEFAULT, Config
 from pogobot.effects import BotState, IntentOutcome, RestartApp, Tap, Transition
 from pogobot.frames import Frame
+from pogobot.observation import Tristate
 from pogobot.quota import SpinQuota
 from tests.factories import obs
 from tests.test_switching import panel
@@ -79,7 +80,11 @@ class _Dash:
 
 
 def make_runner(cfg=DEFAULT, **kw):
-    return runner_mod.Runner(cfg, _Src(), _Act(), perceptor=None, display=False, **kw)
+    runner = runner_mod.Runner(cfg, _Src(), _Act(), perceptor=None, display=False, **kw)
+    # These helper runners represent a game already confirmed on screen. Tests for the
+    # UNKNOWN policy set that state explicitly.
+    runner.ctx.app_foreground = Tristate.TRUE
+    return runner
 
 
 #: The map is confirmed by `obs()` alone: factories default to screen="Overworld" at 0.99,

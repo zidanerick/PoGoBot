@@ -22,6 +22,7 @@ import pytest
 from pogobot import accounts
 from pogobot.accounts import AccountView, FavoriteRow, parse_dump, teleport_home
 from pogobot.effects import Tap
+from pogobot.observation import Tristate
 
 FIX = Path("tests/fixtures/uiautomator")
 WH = (1080, 2340)
@@ -281,6 +282,7 @@ def test_the_incoming_accounts_own_home_is_used():
                 tree_reader=_Reader("pgsharp_shortcut_menu", "pgsharp_favorites",
                                     "pgsharp_favorites"))
     r.stats.account = "Traveller"
+    r.ctx.app_foreground = Tristate.TRUE
     r._go_home()
 
 
@@ -316,6 +318,7 @@ def test_a_failed_go_home_is_reported_but_does_not_raise():
     r = _runner(cfg=replace(DEFAULT, home_favorite="Atlantis"), notifier=rec,
                 tree_reader=_Reader("pgsharp_shortcut_menu", "pgsharp_favorites",
                                     "pgsharp_favorites"))
+    r.ctx.app_foreground = Tristate.TRUE
     r._go_home()
     assert rec.problems == ["Could not return home"]
 
@@ -349,6 +352,7 @@ def test_account_switch_with_async_reader_returns_to_configured_home():
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=rec)
     r.actuator = _Act()
+    r.ctx.app_foreground = Tristate.TRUE
     started = monotonic()
     r._on_switch_confirmed("Traveller")
     assert monotonic() - started < 0.1
@@ -394,6 +398,7 @@ def test_async_home_navigation_failure_reaches_notifier():
         [AccountView(available=False)]))
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=rec)
+    r.ctx.app_foreground = Tristate.TRUE
     r._on_switch_confirmed("Traveller")
     deadline = monotonic() + 2
     while r._home_navigation is not None and monotonic() < deadline:
@@ -451,6 +456,7 @@ def test_runner_reports_unknown_after_favorite_tap_without_retry_or_success(capl
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=recorder)
     r.actuator = _Act()
+    r.ctx.app_foreground = Tristate.TRUE
     caplog.set_level(logging.INFO)
 
     r._on_switch_confirmed("Traveller")
@@ -589,6 +595,27 @@ def test_run_loop_polls_unknown_home_navigation_and_reports_once_without_retry(c
     assert [reason for _, _, reason in r.actuator.taps] == [
         "home: teleport to Home Location"]
     reader.close()
+
+
+def test_unknown_foreground_does_not_authorize_a_favorite_tap():
+    from dataclasses import replace
+    from pogobot.config import DEFAULT
+
+    reader = _AsyncReader(_view("pgsharp_favorites"))
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
+                tree_reader=reader)
+    r.actuator = _Act()
+    r.ctx.app_foreground = Tristate.UNKNOWN
+    r._on_switch_confirmed("Traveller")
+
+    r._poll_home_navigation()
+
+    assert r.actuator.taps == []
+    assert r._home_navigation is not None
+    assert r._home_navigation.result is None
+    assert r._home_navigation.phase == "initial"
+    assert reader.invalidations >= 2
+    r.close()
 
 
 def test_rejected_favorite_tap_cannot_report_success():
@@ -756,6 +783,7 @@ def test_pause_invalidates_home_snapshot_and_resume_uses_fresh_tree():
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=rec)
     r.actuator = _Act()
+    r.ctx.app_foreground = Tristate.TRUE
     r._on_switch_confirmed("Traveller")
     assert entered.wait(0.5)
     r.toggle_pause()
@@ -810,6 +838,7 @@ def test_runner_close_cancels_pending_home_navigation_without_input():
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"),
                 tree_reader=reader, notifier=rec)
     r.actuator = _Act()
+    r.ctx.app_foreground = Tristate.TRUE
     r._on_switch_confirmed("Traveller")
     nav = r._home_navigation
     assert entered.wait(0.5)
@@ -830,4 +859,5 @@ def test_a_ladder_that_throws_cannot_break_the_switch():
             raise RuntimeError("adb died")
 
     r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location"), tree_reader=_Boom())
+    r.ctx.app_foreground = Tristate.TRUE
     r._go_home()

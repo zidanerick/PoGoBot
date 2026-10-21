@@ -6,7 +6,8 @@ import pytest
 
 from pogobot import fsm, runner as R
 from pogobot.config import DEFAULT
-from pogobot.effects import BotState, Back, Tap, Swipe, RestartApp, Halt, ForegroundApp
+from pogobot.effects import (BotState, Back, DoubleTapDrag, Pinch, Tap, Swipe,
+                             RestartApp, Halt, ForegroundApp)
 from pogobot.frames import Frame
 from pogobot.observation import Tristate
 from tests.factories import obs
@@ -145,6 +146,42 @@ def test_failed_foreground_query_is_unknown_and_old_result_is_discarded():
         time.sleep(0.005)
     assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN
     poller.close()
+
+
+def test_expired_foreground_result_becomes_unknown_before_refresh():
+    from pogobot.device import ForegroundPoller
+
+    clock = [0.0]
+    poller = ForegroundPoller(interval=5.0, query=lambda *_: Tristate.TRUE,
+                              clock=lambda: clock[0])
+    assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN
+    for _ in range(100):
+        if not poller._running:
+            break
+        import time
+        time.sleep(0.002)
+    assert poller.read(DEFAULT.app_package) is Tristate.TRUE
+
+    clock[0] = 5.0
+    assert poller.read(DEFAULT.app_package) is Tristate.UNKNOWN, \
+        "an expired TRUE must not authorize input while the next query is pending"
+    poller.close()
+
+
+def test_runner_blocks_all_screen_input_when_foreground_is_unknown():
+    r = make_runner()
+    r.ctx.app_foreground = Tristate.UNKNOWN
+    effects = [
+        Back("unknown foreground"),
+        Tap(0.2, 0.2, "unknown foreground"),
+        Swipe(0.1, 0.2, 0.8, 0.2, "unknown foreground"),
+        DoubleTapDrag(0.5, 0.5, 0.5, 0.3, "unknown foreground"),
+        Pinch(0.5, 0.5, 0.4, 0.2, "unknown foreground"),
+    ]
+
+    r.apply(effects, obs(screen="Menu"))
+
+    assert r.actuator.applied == []
 
 
 def test_replay_and_unit_default_never_query_a_device():

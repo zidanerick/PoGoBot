@@ -33,6 +33,7 @@ from pogobot import fsm
 from pogobot import perception as P
 from pogobot.config import DEFAULT
 from pogobot.effects import Back, BotState, Note, Tap, Transition
+from pogobot.observation import Tristate
 from tests.factories import obs
 
 C = DEFAULT
@@ -179,7 +180,8 @@ def test_desired_state_never_routes_to_rocket_while_the_exit_dialog_is_up():
 # ------------------------------------------------------------------ fsm: the interrupt
 
 def ictx(state=BotState.RECOVERING, **kw):
-    c = fsm.Context(cfg=C, state=state, now=10.0, state_since=0.0)
+    c = fsm.Context(cfg=C, state=state, now=10.0, state_since=0.0,
+                    app_foreground=Tristate.TRUE)
     for k, v in kw.items():
         setattr(c, k, v)
     return c

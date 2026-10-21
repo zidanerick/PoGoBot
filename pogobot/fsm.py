@@ -2118,6 +2118,12 @@ def interrupts(obs: Observation, ctx: Context) -> list[Effect]:
         ]
     if ctx.app_foreground is Tristate.FALSE:
         return []
+    if ctx.app_foreground is Tristate.UNKNOWN and not obs.on_map:
+        # Unknown/stale foreground is not evidence that any screen gesture is safe.
+        # Keep this after the FALSE raise attempt above so a known foreign app can still
+        # receive its bounded foreground request, while UNKNOWN waits for positive
+        # foreground evidence.
+        return []
     if obs.exit_dialog.value and ctx.ready("back", cfg.timings.exit_dialog_back):
         return [Back("dismiss Pokemon GO's own exit-confirmation dialog"),
                 Note("exit-confirmation dialog detected; pressing BACK rather than "
@@ -2284,6 +2290,19 @@ def step(obs: Observation, ctx: Context) -> list[Effect]:
                                "another app is in front of the game")]
         handler = HANDLERS[BotState.RECOVERING]
         if ctx.elapsed > handler.timeout(ctx):
+            return handler.on_timeout(obs, ctx)
+        return []
+
+    if ctx.app_foreground is Tristate.UNKNOWN and not obs.on_map:
+        # Fail closed for all screen input when foreground ownership is unknown or stale.
+        # Move into RECOVERING without a gesture so its non-screen restart/halt ladder can
+        # still resolve a prolonged loss of positive evidence.
+        if ctx.state is not BotState.RECOVERING:
+            return [Transition(BotState.RECOVERING, IntentOutcome.CARRIED,
+                               "foreground state is unknown")]
+        handler = HANDLERS[BotState.RECOVERING]
+        if ctx.elapsed > handler.timeout(ctx) \
+                and ctx.map_stale_since < ctx.now - ctx.cfg.timings.stuck_watchdog:
             return handler.on_timeout(obs, ctx)
         return []
 

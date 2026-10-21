@@ -23,6 +23,7 @@ from .effects import (
     BotState,
     ClearSpatialMemory,
     Cooldown,
+    DoubleTapDrag,
     ForegroundApp,
     Pinch,
     Effect,
@@ -612,10 +613,13 @@ class Runner:
             return
         try:
             state = self.device_service.read(self.cfg.app_package)
-            # UNKNOWN means the asynchronous query has no answer yet. Preserve a known
-            # foreign-app result until a positive game observation (the map or TRUE from
-            # the device service) clears the input barrier.
-            if state is not Tristate.UNKNOWN:
+            # Preserve a known foreign-app block across UNKNOWN, but discard stale TRUE:
+            # an inconclusive refresh cannot authorize input based on an old foreground
+            # observation.
+            if state is Tristate.UNKNOWN:
+                if self.ctx.app_foreground is not Tristate.FALSE:
+                    self.ctx.app_foreground = Tristate.UNKNOWN
+            else:
                 self.ctx.app_foreground = state
         except Exception:
             log.exception("foreground device query failed")
@@ -642,6 +646,15 @@ class Runner:
         settings = userconfig.settings_for(self.account_profiles, self.stats.account)
         home = (settings.get("home_favorite") or self._base_cfg.home_favorite or "").strip()
         if not home:
+            return
+        if not (hasattr(self.tree_reader, "request")
+                and hasattr(self.tree_reader, "poll")
+                ) and self.ctx.app_foreground is not Tristate.TRUE:
+            self.notifier.problem(
+                "Could not return home",
+                "Foreground ownership is unknown or foreign; home-navigation input "
+                f"was blocked after switching to {self.stats.account or 'an unnamed account'}."
+            )
             return
         try:
             if hasattr(self.tree_reader, "request") and hasattr(self.tree_reader, "poll"):
@@ -677,7 +690,18 @@ class Runner:
             self._home_navigation = None
             return
         try:
-            completed = navigation.advance()
+            allow_input = self.ctx.app_foreground is Tristate.TRUE
+            if not allow_input and navigation.phase != "initial":
+                # A tap already changed the screen epoch. If foreground ownership then
+                # becomes unknown or foreign, invalidate that observation and fail closed
+                # instead of guessing at the next screen.
+                navigation.tree_reader.invalidate()
+                navigation.failure = "Foreground ownership became unknown or foreign " \
+                    "during home navigation"
+                navigation.finished = True
+                completed = False
+            else:
+                completed = navigation.advance(allow_input=allow_input)
         except Exception as exc:
             log.exception("could not return home asynchronously")
             navigation.failure = str(exc) or type(exc).__name__
@@ -1262,6 +1286,10 @@ class Runner:
 
     def apply(self, effects: list[Effect], obs: Observation) -> None:
         """One place applies everything, so dry-run and tracing cannot be forgotten."""
+        # A current map observation is positive evidence that the game owns the screen.
+        # Off-map input requires a fresh positive device foreground result.
+        if obs is not None and obs.on_map:
+            self.ctx.app_foreground = Tristate.TRUE
         rotation_accepted = False
         for e in effects:
             if isinstance(e, Transition):
@@ -1300,6 +1328,11 @@ class Runner:
                 self._stop = True
                 self.enter_state(BotState.HALTED, IntentOutcome.CARRIED, e.reason)
             elif is_actuation(e):
+                if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag, Pinch)) \
+                        and self.ctx.app_foreground is not Tristate.TRUE:
+                    log.warning("blocked screen input while foreground is %s: %s",
+                                self.ctx.app_foreground.value, e.reason)
+                    continue
                 if self.actuator.apply(e, now=self.ctx.now):
                     rotation_accepted = isinstance(e, Swipe) and e.budget == "rotate"
                     budget = getattr(e, "budget", "tap")
@@ -1315,13 +1348,11 @@ class Runner:
                         # switch_zoom_reps and app_restarts follow: a refused command must
                         # not spend the bound that decides when to escalate to a restart.
                         self.ctx.foregrounds += 1
-                        # Stays FALSE, not UNKNOWN. Setting it to UNKNOWN here lifted the
-                        # refusal in `fsm.step` for the whole gap until the next check, and
-                        # the bot spent that gap tapping - straight back onto the sponsored
-                        # link it had just been rescued from. Measured: `am start` worked
-                        # every single time and the run still ended in Chrome. Only a check
-                        # that SEES the game may say it is back, and the stamp below makes
-                        # that check happen on the very next tick.
+                        # Keep a known foreign-app block; otherwise discard the old answer
+                        # until a fresh query confirms the foreground. An accepted launch
+                        # is not evidence that Android focused the game.
+                        if self.ctx.app_foreground is not Tristate.FALSE:
+                            self.ctx.app_foreground = Tristate.UNKNOWN
                         self.device_service.invalidate()
                     elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
