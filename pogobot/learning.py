@@ -64,6 +64,7 @@ from typing import Deque, Optional, Sequence
 import cv2
 import numpy as np
 
+from .contracts import FrameRef
 from .effects import IntentOutcome
 from .frames import Frame
 from .fsm import Intent
@@ -112,6 +113,7 @@ class _Staged:
     ts: float
     bgr: np.ndarray
     detections: tuple[Detection, ...]
+    frame_ref: Optional[FrameRef] = None
 
 
 @dataclass(frozen=True)
@@ -200,7 +202,7 @@ class IntentLedger:
 
         self._lock = threading.Lock()
         self._counters = _Counters()
-        self._ring: "OrderedDict[int, _Staged]" = OrderedDict()
+        self._ring: "OrderedDict[object, _Staged]" = OrderedDict()
         self._hashes: Deque[int] = deque(maxlen=policy.dedup_memory)
         self._queue: "queue.Queue[object]" = queue.Queue(maxsize=policy.queue_size)
         self._thread: Optional[threading.Thread] = None
@@ -307,7 +309,11 @@ class IntentLedger:
         """
         if not self.enabled or not obs.detections:
             return
-        if obs.seq != frame.seq:
+        if obs.seq != frame.seq or obs.frame_ref != frame.frame_ref:
+            return
+        if frame.frame_ref is not None and (
+                frame.frame_ref.seq != frame.seq
+                or float(frame.frame_ref.captured_mono_s) != frame.ts):
             return
         # The copy is a ~2MB memcpy and stays OUTSIDE the lock: `stats()` runs on the HUD
         # path every displayed frame and the writer thread takes the same lock, so holding
@@ -317,10 +323,11 @@ class IntentLedger:
             ts=frame.ts,
             bgr=frame.bgr.copy(),
             detections=tuple(obs.detections),
+            frame_ref=frame.frame_ref,
         )
         horizon = frame.ts - self.policy.causal_max_s
         with self._lock:
-            self._ring[frame.seq] = staged
+            self._ring[self._identity_key(frame.seq, frame.frame_ref)] = staged
             # Evict on age as well as count: a frame older than the causal window can
             # never be claimed by a resolving intent, so holding it only costs memory.
             while len(self._ring) > 1 and (
@@ -328,6 +335,12 @@ class IntentLedger:
                 or next(iter(self._ring.values())).ts < horizon
             ):
                 self._ring.popitem(last=False)
+
+    @staticmethod
+    def _identity_key(seq: int, frame_ref: Optional[FrameRef]) -> object:
+        if frame_ref is None:
+            return ("legacy", seq)
+        return (frame_ref.run_id, frame_ref.capture_epoch, frame_ref.seq)
 
     # ------------------------------------------------------------------ resolve
 
@@ -350,7 +363,7 @@ class IntentLedger:
             return self._reject("confirmation outside causal window")
 
         with self._lock:
-            staged = self._ring.get(intent.frame_seq)
+            staged = self._ring.get(self._identity_key(intent.frame_seq, intent.frame_ref))
         if staged is None:
             return self._reject("tap frame no longer staged")
 
@@ -387,6 +400,12 @@ class IntentLedger:
                 # line or be joined against the trace log.
                 "ts": round(wall, 3),
                 "seq": staged.seq,
+                "frame_ref": (None if staged.frame_ref is None else {
+                    "run_id": staged.frame_ref.run_id,
+                    "capture_epoch": staged.frame_ref.capture_epoch,
+                    "seq": staged.frame_ref.seq,
+                    "captured_mono_s": float(staged.frame_ref.captured_mono_s),
+                }),
                 "target": intent.target_name,
                 "conf": round(intent.confidence, 4),
                 "expected": intent.expected.value,
