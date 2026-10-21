@@ -8,9 +8,13 @@ import pytest
 from pogobot.capture import ReplaySource, ScrcpySource
 from pogobot.config import DEFAULT
 from pogobot.contracts import FrameRef, MonotonicSeconds, SystemClock
+from pogobot.effects import BotState, IntentOutcome
+from pogobot.fsm import Intent
+from pogobot.learning import IntentLedger
 from pogobot.observation import ScreenGuess
 from pogobot.perception import Perceptor
 from pogobot.runner import Runner
+from tests.factories import det, obs as make_obs
 
 
 class _Actuator:
@@ -100,6 +104,29 @@ def test_live_reset_and_reconnect_advance_epoch_and_drop_buffered_frame():
     source._latest_seq = 3
     assert source.reconnected() == 2
     assert source._seq == 0 and source._latest is None
+
+
+def test_delayed_old_epoch_intent_cannot_resolve_reused_sequence(tmp_path):
+    old_ref = FrameRef("run", 0, 1, MonotonicSeconds(1.0))
+    new_ref = FrameRef("run", 1, 1, MonotonicSeconds(1.2))
+    from pogobot.frames import Frame
+    new_frame = Frame(seq=1, ts=1.2, bgr=np.zeros((32, 24, 3), dtype=np.uint8),
+                      frame_ref=new_ref)
+    observation = make_obs(seq=1, ts=1.2, detections=(det(),))
+    from dataclasses import replace
+    observation = replace(observation, frame_ref=new_ref)
+    ledger = IntentLedger(tmp_path / "ledger", ["pokemon"])
+    try:
+        ledger.stage(new_frame, observation)
+        old_intent = Intent(
+            ts=1.0, target_name="pokemon", confidence=0.9,
+            tap_norm=(0.5, 0.6), xywhn=(0.5, 0.6, 0.1, 0.1),
+            expected=BotState.ENCOUNTER, frame_seq=1, frame_ref=old_ref,
+        )
+        reason = ledger.resolve(old_intent, IntentOutcome.CONFIRMED, now=1.5)
+        assert reason == "tap frame no longer staged"
+    finally:
+        ledger.close()
 
 
 def test_runner_owns_run_id_and_rejects_mismatched_production_identity(tmp_path):
