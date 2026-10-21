@@ -69,7 +69,7 @@ def app_foreground(package: str, adb: str = "adb", serial: Optional[str] = None)
 
 def ensure_app_running(package: str, activity: str, adb: str = "adb",
                        serial: Optional[str] = None, timeout: float = 40.0,
-                       log=None) -> bool:
+                       log=None, *, device_services=None, clock: Optional[Clock] = None) -> bool:
     """Start the game if it is not already up, and wait for it to reach the foreground.
 
     The capture layer needs this, not merely the bot's own logic. scrcpy records the
@@ -84,12 +84,20 @@ def ensure_app_running(package: str, activity: str, adb: str = "adb",
     fatal on its own: the caller is better placed to decide, and a game that is slow to the
     foreground may still get there before BOOT's own budget runs out.
     """
-    if app_foreground(package, adb, serial):
+    def foreground_state() -> Tristate:
+        if device_services is not None:
+            if clock is None:
+                raise ValueError("clock is required with DeviceServices")
+            return device_services.snapshot(clock.monotonic_now()).foreground
+        return Tristate.TRUE if app_foreground(package, adb, serial) else Tristate.FALSE
+
+    if foreground_state() is Tristate.TRUE:
         return True
-    started = app_running(package, adb, serial)
+    started = app_running(package, adb, serial) if device_services is None else None
     if log is not None:
-        log.info("the game is %s; starting it before capture opens",
-                 "running but not in front" if started else "not running")
+        description = ("not in the foreground" if started is None else
+                       "running but not in front" if started else "not running")
+        log.info("the game is %s; starting it before capture opens", description)
     cmd = ([adb] + (["-s", serial] if serial else [])
            + ["shell", "am", "start", "-n", f"{package}/{activity}"])
     try:
@@ -100,7 +108,7 @@ def ensure_app_running(package: str, activity: str, adb: str = "adb",
         return False
     deadline = time.time() + timeout
     while time.time() < deadline:
-        if app_foreground(package, adb, serial):
+        if foreground_state() is Tristate.TRUE:
             if log is not None:
                 log.info("the game is up")
             return True
