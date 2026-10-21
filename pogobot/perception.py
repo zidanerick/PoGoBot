@@ -676,6 +676,7 @@ class Perceptor:
             action_pill_xy=find_action_pill(bgr, cfg),
             promo_save_xy=promo_save_button(bgr, cfg),
             frame_age=frame.age(),
+            frame_ref=frame.frame_ref,
             goplus=goplus_signal(bgr, cfg),
             party_can_battle=party_can_battle(bgr, cfg),
             exit_dialog=exit_dialog_signal(bgr, cfg),
