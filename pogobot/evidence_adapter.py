@@ -39,10 +39,25 @@ class EvidenceAdapter:
             raise ValueError("FrameRef.captured_mono_s must be finite and nonnegative")
         if frame.seq != observation.seq or frame.ts != observation.ts:
             raise ValueError("Frame and Observation identities disagree")
-        if frame_ref.seq != frame.seq or frame_ref.captured_mono_s != frame.ts:
-            raise ValueError("FrameRef does not identify the source Frame")
-        observation_ref = getattr(observation, "frame_ref", None)
-        if observation_ref is not None and observation_ref != frame_ref:
+        if frame_ref.seq != frame.seq:
+            raise ValueError("FrameRef does not identify the source Frame sequence")
+
+        # `Frame.ts` was a process perf-counter value in the legacy API, while T01's
+        # captured_mono_s is run-relative. Do not compare across those clock domains;
+        # trust the reference created at capture and require runtime types that expose
+        # one to carry the same reference through Frame and Observation.
+        missing = object()
+        source_ref = getattr(frame, "frame_ref", missing)
+        if source_ref is not missing:
+            if source_ref is None:
+                raise ValueError("Frame is missing its capture FrameRef")
+            if source_ref != frame_ref:
+                raise ValueError("Frame carries a different FrameRef")
+        observation_ref = getattr(observation, "frame_ref", missing)
+        if observation_ref is not missing:
+            if observation_ref is None:
+                raise ValueError("Observation is missing its FrameRef")
+        if observation_ref is not missing and observation_ref != frame_ref:
             raise ValueError("Observation carries a different FrameRef")
 
     @staticmethod
