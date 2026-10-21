@@ -10,6 +10,7 @@ import pytest
 from pogobot import runner as runner_mod
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState
+from pogobot.contracts import SystemClock
 from pogobot.stats import SessionStats
 
 
@@ -90,16 +91,18 @@ def test_the_file_and_the_toggle_are_independent(tmp_path):
 def test_paused_time_does_not_age_the_state_machine():
     """The whole point: a deadline must not expire while the bot is idle."""
     r = _runner()
+    source = [1000.0]
+    r.clock = SystemClock(lambda: source[0], origin=1000.0)
     r.toggle_pause()
     r._sync_pause()
-    r._paused_at = time.perf_counter() - 300.0        # five minutes paused
+    source[0] += 300.0
     r.toggle_pause()
     r._sync_pause()
     assert r._pause_total == pytest.approx(300.0, abs=2)
-    # ctx.now is driven from perf_counter minus paused time, so a deadline stamped before
-    # the pause is still the same distance away afterwards.
-    before = time.perf_counter() - r.stats.paused_seconds
-    assert time.perf_counter() - before == pytest.approx(300.0, abs=2)
+    assert float(r.clock.monotonic_now()) == pytest.approx(300.0)
+    assert float(r.clock.active_now()) == pytest.approx(0.0)
+    source[0] += 1.0
+    assert float(r.clock.active_now()) == pytest.approx(1.0)
 
 
 def test_paused_time_is_excluded_from_the_rates():
@@ -120,7 +123,7 @@ def test_paused_seconds_grows_while_still_paused():
     r = _runner()
     r.toggle_pause()
     r._sync_pause()
-    r._paused_at = time.perf_counter() - 10.0
+    r._paused_at = float(r.clock.monotonic_at(time.perf_counter() - 10.0))
     r._sync_pause()
     assert r.stats.paused_seconds >= 10.0, "a long pause must be visible before it ends"
 
