@@ -262,7 +262,7 @@ The focused counts above are offline-only reports, not Android/device, live game
 
 ### PR #1 mergeability investigation
 
-At input head `ef160123a8cf5dccc73656762683f394cf68949d`, GitHub PR metadata returned `mergeable=true`. The `main` comparison is `ahead` by 26, `behind` by 0, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8`; the only changed path is the new `docs/IMPLEMENTATION_BACKLOG.md`. An earlier metadata read reported `mergeable=false` at this same head, followed by `true`. The observations support a transient/stale mergeability calculation; no persistent content conflict is evidenced by the compare result. Recheck GitHub metadata after any new base/head update; do not treat the false sample as a source conflict or merge blocker without a conflict-bearing diff.
+At refreshed PR #1 head `480ccf22752b6418554f2fa4c27dbea2b84f4802`, GitHub metadata first returned `mergeable=false`, then two immediate reads returned `true`. The `main` comparison is `ahead` by 27, `behind` by 0, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8`; the only changed path is the added `docs/IMPLEMENTATION_BACKLOG.md`. The alternating metadata result on an unchanged head and a clean path comparison indicate a transient/cached mergeability calculation; the connector provides no conflict detail, so the precise cause cannot be established. No persistent content conflict is evidenced. Recheck after any new base/head update and inspect GitHub's merge-conflict details before treating a false sample as a source conflict.
 
 ### Current blockers to integration testing
 
@@ -274,9 +274,9 @@ At input head `ef160123a8cf5dccc73656762683f394cf68949d`, GitHub PR metadata ret
 
 ### Next integration candidate
 
-The next candidate is **T01 only**, cut from the common `main` base after Contract v1.1 review. It is not an integration of the four PRs. The Lead owns `contracts.py`, public `Frame`/`Observation` fields, shared `Context`/Runner and composition; Reliability supplies the device adapter as a narrow patch and owns its internals. No specialist edits to lead-owned shared files.
+The next candidate is **T01 only**, cut from common `main` at `9795280ec52b67cde316c45aa531e64c39ddd9b8`; branch `integration/t01-clock-frame-ref` is in progress at `bc7d1f4311a2d783c28b21415ee13129167fed94`. It is not an integration of the four PRs. The Lead owns `contracts.py`, public `Frame`/`Observation` fields, capture-to-observation identity propagation, shared `Context`/Runner and composition; Reliability supplies the device adapter as a narrow patch and owns its internals. No specialist edits to lead-owned shared files.
 
-T01 must implement and test the injected dual-domain Clock, DeviceServices and capture-stamped FrameRef path; replay must remain device-free. Entry requires owners to accept Contract v1.1 semantics. Exit requires T01's focused command in the ordered-ticket matrix and then the integrated offline gate `python -m pytest tests -q` on the assembled candidate. Do not claim T01 complete based on PR #3's poller tests or PR #2/#4 focused runs.
+Candidate slice implemented: clock types and `SystemClock`; optional `FrameRef` fields; identity stamping by current live/replay capture sources; propagation by `Perceptor.observe`; focused tests in `tests/test_clock_contract.py` and `tests/test_frame_identity.py`. These definitions and fields remain proposals until candidate tests pass and interface review accepts them. T01 is incomplete: Runner/CLI clock injection, cached live `DeviceServices`, explicit fake/replay composition and zero-external-call proof, capture epoch reset/reconnect behavior, and full offline integration are not implemented. Run `python -m pytest tests/test_clock_contract.py tests/test_frame_identity.py -q`; this candidate command has not yet been run. Then run `python -m pytest tests -q` on the assembled candidate. Do not claim T01 complete based on PR #3's poller tests or PR #2/#4 focused runs.
 
 ### Proposed branch order
 
