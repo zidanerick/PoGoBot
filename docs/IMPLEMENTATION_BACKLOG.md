@@ -262,7 +262,7 @@ The focused counts above are offline-only reports, not Android/device, live game
 
 ### PR #1 mergeability investigation
 
-At the last rechecked PR #1 head before this documentation edit, `ed616d809e91d14dde8c6454318b58d6dd3e839e`, GitHub metadata returned `mergeable=false`. Its `main` comparison was `ahead` by 30, `behind` by 0, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8`; the only changed path was the added `docs/IMPLEMENTATION_BACKLOG.md`. At prior head `480ccf22752b6418554f2fa4c27dbea2b84f4802`, metadata returned false once and true twice without a head change. The clean comparison exposes no conflicting path, but the connector response gives no detailed conflict reason; the precise cause remains unresolved. Check GitHub's merge-conflict details before treating a false sample as a source conflict.
+At sampled PR #1 head `7bf10054712507f5cbafe928c59226ba917cc295`, GitHub metadata returned `mergeable=false`. Its `main` comparison was `ahead` by 31, `behind` by 0, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8`; the only changed path was the added `docs/IMPLEMENTATION_BACKLOG.md`. At prior head `480ccf22752b6418554f2fa4c27dbea2b84f4802`, metadata returned false once and true twice without a head change. The clean comparison exposes no conflicting path, but the connector response gives no detailed conflict reason; the precise cause remains unresolved. Check GitHub's merge-conflict details before treating a false sample as a source conflict.
 
 ### Current blockers to integration testing
 
