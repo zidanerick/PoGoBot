@@ -243,7 +243,7 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 ## Current PR reconciliation and merge gates
 
-The exact PR heads were rechecked immediately before this refresh: #1 `2e9e6df7c966798e2522ca805cf5b6b4b8b0315e`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `c2cd5ae24a3f3da12c0ec0d63d0f16b5fdefdbfb`. All are open against `main`; none is merged. Updating this plan advances PR #1 again. Its resulting head is the commit returned by this update, so this document cannot self-reference that new SHA. Recheck PR metadata before relying on this plan.
+The exact PR heads were rechecked immediately before this refresh: #1 `2e9e6df7c966798e2522ca805cf5b6b4b8b0315e`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `877757c9e1a6afac1b9a13e41ccc8639b68ac3eb`. All are open against `main`; none is merged. Updating this plan advances PR #1 again. Its resulting head is the commit returned by this update, so this document cannot self-reference that new SHA. Recheck PR metadata before relying on this plan.
 
 ### PR head and test-evidence recheck
 
@@ -252,7 +252,7 @@ The exact PR heads were rechecked immediately before this refresh: #1 `2e9e6df7c
 | #1 `2e9e6df` (pre-refresh input head) | Contract v1.1 and integration plan only; docs-only. | No runtime tests apply. Every shared API remains a proposal until its implementation ticket is integrated and accepted. This plan refresh advances #1. |
 | #2 `c6fcf83` | Isolated gesture planner/calibration, injector, transport, tests and Android smoke procedure. Not connected to gameplay ActionPort. | Focused offline run: **27 passed** (independent result supplied for this reconciliation; PR body also lists 27). PR body command: `PYTHONPATH=/root/.local/lib/python3.12/site-packages python -m pytest tests/test_gestures.py tests/test_gesture_transport.py tests/test_gesture_dex.py -q`. Synthetic DEX tests do not prove a real D8 build. No Android input was run. |
 | #3 `1dbfe97` | Runtime recovery/rotation, nonblocking foreground and UI-tree polling, async home navigation. Current source includes fail-closed UNKNOWN tests and the Runner.run-loop post-teleport notifier regression `test_run_loop_polls_unknown_home_navigation_and_reports_once_without_retry` in `tests/test_go_home.py`. | Focused offline run: **106 passed** (independently reported). Exact command/test selection was not included in the available evidence, so this does not establish that the named notifier regression was among the executed tests. The PR description's **990 passed, 39 skipped** from `python -m pytest tests --ignore=tests/test_sponsored_ad.py -q` remains a PR-description claim, not an independently verified run at this head. |
-| #4 `c2cd5ae` | Offline detector/outcome evaluation, reviewed promotion and extraction safeguards, README and held-out corpus protocol. No runtime FrameRef/outcome integration. | Focused offline run: **23 passed** (independently reported). Exact command/test selection was not included in the available evidence. The PR description still says 11 passed; treat that as stale description text, not the focused result. No reviewed corpus or accuracy result exists. |
+| #4 `877757c` | Offline detector/outcome evaluation, reviewed promotion and extraction safeguards, README and held-out corpus protocol. No runtime FrameRef/outcome integration. | Focused offline run: **23 passed** (independently reported); exact command, selected tests and tested SHA were not supplied, so the result is not yet tied to this current head. PR body still says 11 passed and is stale. No reviewed corpus or accuracy result exists. |
 
 The focused counts above are offline-only reports, not Android/device, live gameplay, or accuracy evidence. The PR #3 notifier test is **present in current source**, correcting the stale “missing test” statement. Its execution at this head still needs a recorded command and test output that demonstrates the test was selected. The contradictory old UNKNOWN behavior is also corrected in current #3 source: its FSM test expects no Back/Tap/Swipe/Pinch for UNKNOWN and retains bounded non-screen restart escalation. Keep that behavior as required policy; do not restore the old expectation.
 
@@ -266,7 +266,7 @@ The focused counts above are offline-only reports, not Android/device, live game
 
 ### Proposed branch order
 
-This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `2e9e6df`, #2 `c6fcf83`, #3 `1dbfe97`, and #4 `c2cd5ae`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; exact-head execution evidence for the notifier test still needs to be recorded.
+This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `2e9e6df`, #2 `c6fcf83`, #3 `1dbfe97`, and #4 `877757c`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; exact-head execution evidence for the notifier test still needs to be recorded.
 
 1. **Contract review (#1)**: accept v1.1 signatures and invariants; record approval. No behavior is implemented by this documentation step.
 2. **T01 shared runtime seam (Lead owns shared files; Reliability contributes device adapter)**: implement dual clocks, DeviceServices, capture-stamped FrameRef through Frame/Observation/Evidence, replay isolation and baseline CI. PR #3 adapts to these seams.
@@ -339,7 +339,7 @@ Then run one short, attended gameplay session on an explicitly selected test pro
 
 ### Contract field status at rechecked PR heads
 
-The #1 v1.1 APIs below are proposals unless explicitly marked as existing specialist implementation. “Accepted policy” means the rule is agreed; it does not make the proposed shared runtime API implemented. PR heads were rechecked before this plan refresh, and #1 advances with this update.
+The #1 v1.1 APIs below are proposals unless explicitly marked as existing specialist implementation. “Accepted policy” means the rule is agreed; it does not make the proposed shared runtime API implemented. PR heads were rechecked before this plan refresh; #4 advanced to `877757c9e1a6afac1b9a13e41ccc8639b68ac3eb` during the refresh and was rechecked, while #1 advances with this update.
 
 | Contract area | Status |
 |---|---|
@@ -351,7 +351,7 @@ The #1 v1.1 APIs below are proposals unless explicitly marked as existing specia
 | Fail-closed UNKNOWN/stale foreground behavior | Accepted integration policy. Implemented in current #3 source/tests (FSM and Runner guards); still must be integrated and preserved on the shared runtime branch. |
 | Runtime reliability and async home navigation | Implemented in #3 source. Current source contains the Runner.run-loop unavailable-result notifier test and fail-closed UNKNOWN tests. Focused offline run is reported as 106 passed, but exact command/test selection was not supplied; record targeted execution evidence before clearing T02. PR-description 990/39 remains a broad-count claim unless rerun at current head. |
 | Gesture planner/calibration/injector/isolated transport | Implemented in #2 source/tests as isolated components; not connected to common ActionPort, FrameRef or Clock. Independent focused offline run: 27 passed. Real D8 output and Android input are unverified. |
-| Evaluation, reviewed promotion and extraction tools | Implemented in #4 source. Independent focused offline run: 23 passed; PR body says 11 and is stale. No reviewed corpus or accuracy result. |
+| Evaluation, reviewed promotion and extraction tools | Implemented in #4 source. Independent focused offline run: 23 passed, but tested SHA/selection are unspecified and current-head coverage is unverified; PR body says 11 and is stale. No reviewed corpus or accuracy result. |
 | Provider capability interface/consumer policy and Autoplay encounter/stop loops | Proposal in #1; no current Autoplay implementation PR. |
 
 
