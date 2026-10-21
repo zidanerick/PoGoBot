@@ -19,6 +19,7 @@ from typing import Optional
 
 from .accounts import AccountView
 from .config import Config, Timings
+from .contracts import FrameRef
 from .effects import (
     ForegroundApp,
     Pinch,
@@ -55,6 +56,7 @@ class Intent:
     xywhn: tuple[float, float, float, float]
     expected: BotState
     frame_seq: int
+    frame_ref: Optional[FrameRef] = None
 
 
 @dataclass
@@ -675,7 +677,7 @@ class Scanning(Handler):
             goto = BotState.POKESTOP if target.name in STOP_TARGETS else BotState.TARGETING
             intent = Intent(ts=ctx.now, target_name=target.name, confidence=target.conf,
                             tap_norm=(x, y), xywhn=target.xywhn, expected=expected,
-                            frame_seq=obs.seq)
+                            frame_seq=obs.seq, frame_ref=obs.frame_ref)
             return [
                 SetIntent(intent),
                 Tap(x, y, f"target {target.name} conf={target.conf:.2f}"),
