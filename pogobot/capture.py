@@ -145,8 +145,6 @@ class ScrcpySource:
         self._release_lock = threading.Lock()
         self._released = False
 
-        self._run_id = str(uuid4())
-        self._capture_epoch = 0
         self._latest: Optional[np.ndarray] = None
         self._latest_seq = 0
         self._latest_ts = 0.0
