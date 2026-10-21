@@ -592,6 +592,10 @@ class ScreenStabilizer:
         self._hist: deque = deque(maxlen=window)
         self._stable: Optional[ScreenGuess] = None
 
+    def reset(self) -> None:
+        self._hist.clear()
+        self._stable = None
+
     def push(self, guess: ScreenGuess) -> ScreenGuess:
         if not guess.available:
             return guess
@@ -652,6 +656,10 @@ class Perceptor:
                     xywhn=tuple(float(v) for v in b.xywhn[0].tolist()),
                 ))
         return tuple(out)
+
+    def reset_temporal_state(self) -> None:
+        """Drop history that must not cross a capture discontinuity."""
+        self.stabilizer.reset()
 
     def observe(self, frame: Frame, keyboard: Tristate = Tristate.UNKNOWN,
                 run_detector: bool = True) -> Observation:
