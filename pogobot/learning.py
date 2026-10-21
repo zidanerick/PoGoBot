@@ -516,6 +516,11 @@ class IntentLedger:
 
     # ------------------------------------------------------------------ lifecycle
 
+    def clear_staged(self) -> None:
+        """Discard candidate evidence after capture identity changes."""
+        with self._lock:
+            self._ring.clear()
+
     def stats(self) -> dict:
         """HUD snapshot. v1 showed only `+N -N`, which stayed green while it wrote garbage;
         the rejection histogram is the part that tells you the loop is behaving."""
