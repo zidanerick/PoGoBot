@@ -11,6 +11,7 @@ from pathlib import Path
 
 from . import userconfig
 from .config import BASE_DIR, Config
+from .observation import Tristate
 
 #: `--reset-spins` with no value means "every account" - the same thing a bare
 #: `--reset-spins` has always meant. An object identity sentinel rather than a string like
@@ -395,7 +396,8 @@ def main(argv=None) -> int:
     from .actions import Actuator, NullActuator
     from .stats import SessionStats
     from .capture import ReplaySource, ScrcpySource
-    from .device import KeyboardPoller, device_online, ensure_app_running, screen_size
+    from .contracts import SystemClock
+    from .device import LiveDeviceServices, ReplayDeviceServices, ensure_app_running
     from .learning import IntentLedger
     from .perception import Perceptor
     from .runner import Runner
@@ -424,6 +426,8 @@ def main(argv=None) -> int:
     class_names = [det.names[i] for i in sorted(det.names)]
     log.info("detector classes: %s", class_names)
 
+    clock = SystemClock(time.perf_counter)
+    device_services = None
     tree_reader = None
     account = a.account
     roster: tuple[str, ...] = ()
@@ -431,20 +435,28 @@ def main(argv=None) -> int:
         source = ReplaySource(a.replay, interval=a.replay_interval)
         actuator = NullActuator()
         keyboard = None
+        device_services = ReplayDeviceServices()
         screen_wh = (1080, 2340)
         log.info("REPLAY mode: %s (no device will be touched)", a.replay)
     else:
-        if not device_online(serial=a.serial):
+        device_services = LiveDeviceServices(clock, cfg.app_package, serial=a.serial)
+        startup = device_services.startup_snapshot(timeout=12.0)
+        if startup.online is not Tristate.TRUE:
+            device_services.close()
             log.error("no adb device. Connect the phone and authorize USB debugging.")
             return 2
-        screen_wh = screen_size(serial=a.serial)
+        screen_wh = startup.logical_wh
+        if screen_wh is None:
+            device_services.close()
+            log.error("could not read the device display size")
+            return 2
         log.info("device screen %dx%d", *screen_wh)
         # Before capture, not after: see device.ensure_app_running for why a still
         # launcher produces no frames at all and takes ScrcpySource down with it.
         ensure_app_running(cfg.app_package, cfg.app_activity, serial=a.serial, log=log)
         source = ScrcpySource(cfg, serial=a.serial)
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
-        keyboard = KeyboardPoller(serial=a.serial).start()
+        keyboard = None
 
         from .accounts import UiTreeReader
         tree_reader, account, roster = prepare_accounts(
@@ -524,7 +536,7 @@ def main(argv=None) -> int:
                     dialogue_dump=a.collect_dialogues,
                     quota=quota, pause_file=a.pause_file, tree_reader=tree_reader,
                     roster=roster, account_profiles=account_profiles,
-                    notifier=notifier)
+                    notifier=notifier, clock=clock, device_services=device_services)
     if dashboard is None:
         # No dashboard means Runner kept the SessionStats it built itself; name it here
         # so the very first session's spins are booked under the identified account rather
@@ -540,3 +552,4 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
