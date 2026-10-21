@@ -122,6 +122,24 @@ def test_adb_transport_propagates_cancel_to_android_process(monkeypatch):
     assert_cleaned_up(process)
 
 
+def test_pre_cancelled_action_does_not_start_injector_or_submit_plan(monkeypatch):
+    process = FakeProcess()
+    transport = prepare_transport(monkeypatch, process)
+    popen_calls = []
+    monkeypatch.setattr(actions.subprocess, "Popen",
+                        lambda *a, **kw: popen_calls.append((a, kw)) or process)
+    trajectory, calibration = build_plan()
+    cancel = threading.Event()
+    cancel.set()
+
+    receipt = transport.execute(trajectory, calibration, cancel)
+
+    assert receipt.status == "cancelled"
+    assert popen_calls == []
+    assert process.stdin.writes == []
+    assert process.wait_calls == 0
+
+
 def test_injector_startup_timeout_cleans_up_process(monkeypatch):
     process = FakeProcess(ready=False)
     transport = prepare_transport(monkeypatch, process, timeout=.01)
@@ -179,4 +197,19 @@ def test_missing_terminal_receipt_times_out_and_cleans_up(monkeypatch):
         assert "terminal receipt" in str(exc)
     else:
         raise AssertionError("missing terminal response must time out")
+    assert_cleaned_up(process)
+
+
+def test_unknown_terminal_response_times_out_without_success(monkeypatch):
+    process = FakeProcess(plan_responses=("START 1000", "MAYBE 1120"))
+    transport = prepare_transport(monkeypatch, process, timeout=.01)
+    trajectory, calibration = build_plan()
+
+    try:
+        transport.execute(trajectory, calibration, threading.Event())
+    except TimeoutError as exc:
+        assert "MAYBE 1120" in str(exc)
+        assert "terminal receipt" in str(exc)
+    else:
+        raise AssertionError("unknown terminal response must never report success")
     assert_cleaned_up(process)
