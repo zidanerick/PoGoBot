@@ -243,9 +243,9 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 ## Current PR reconciliation and merge gates
 
-Exact PR heads rechecked before this refresh: #1 `42ab896cb79897ffdad9446d193977f2e5d87274`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. All are open against `main`; none is merged. Updating this plan advances PR #1; recheck its resulting head after this commit.
+Live PR state sampled immediately before this plan update: #1 `0906456f445964a51e723cefdea44d38eb539da4`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `e8e1ec268c88c22b2b6b0024f0faeccb0eaedc75`. All are open and unmerged. This plan update advances PR #1; its new head must be read from GitHub after the write.
 
-**PR #1 mergeability check:** current metadata for input head `42ab896cb79897ffdad9446d193977f2e5d87274` reports `mergeable=false`. Comparing `docs/shared-interfaces-backlog` with `main` reports 39 commits ahead, zero behind, merge base equal to `main` at `9795280ec52b67cde316c45aa531e64c39ddd9b8`, and one changed path: added `docs/IMPLEMENTATION_BACKLOG.md`. The compare exposes no conflict path or divergent base, so it does not explain the false flag. The precise cause remains unresolved. No status checks were reported. No merge was performed.
+At input head `0906456f445964a51e723cefdea44d38eb539da4`, GitHub reports PR #1 `mergeable=true`. Its comparison with `main` is 41 commits ahead, zero behind, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8` and only `docs/IMPLEMENTATION_BACKLOG.md` added. Earlier `mergeable=false` samples were not accompanied by a conflicting path; the current API status is true. No merge was performed.
 
 ### PR head and test-evidence recheck
 
