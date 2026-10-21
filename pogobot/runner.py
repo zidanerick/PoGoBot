@@ -12,6 +12,7 @@ import logging
 import signal
 from collections import deque
 import time
+from uuid import uuid4
 from pathlib import Path
 from typing import Optional
 
@@ -38,11 +39,12 @@ from .effects import (
     is_actuation,
 )
 from .frames import Frame, FrameSource
+from .contracts import Clock, MonotonicSeconds, SystemClock
 from .observation import Observation, Tristate
-from . import device
 from . import userconfig
 from .quota import SpinQuota
 from .stats import SessionStats, append_session
+from .device import FakeDeviceServices, LiveDeviceServices, ReplayDeviceServices
 
 from .quota import _hms
 
@@ -135,8 +137,16 @@ class Runner:
                  pause_file: Optional[Path] = None, tree_reader=None,
                  roster: tuple[str, ...] = (),
                  account_profiles: Optional[dict] = None,
-                 notifier=None):
+                 notifier=None,
+                 clock: Optional[Clock] = None,
+                 device_services=None):
         self.cfg = cfg
+        self.run_id = str(uuid4())
+        origin = getattr(source, "monotonic_origin", None)
+        self.clock = clock or SystemClock(time.perf_counter, origin=origin)
+        bind_run = getattr(source, "bind_run", None)
+        if bind_run is not None:
+            bind_run(self.run_id, self.clock)
         #: Optional Discord notifications. A null object by default so no call
         #: site below needs a guard (see notify.NullNotifier).
         if notifier is None:
@@ -154,6 +164,18 @@ class Runner:
         self._profile_account: object = _UNSET
         self._foreground_checked_at = -1e9
         self.source = source
+        if device_services is None:
+            if getattr(source, "is_replay", False):
+                device_services = ReplayDeviceServices()
+            elif getattr(source, "identity_required", False):
+                device_services = LiveDeviceServices(
+                    self.clock, cfg.app_package,
+                    serial=getattr(actuator, "serial", None))
+            else:
+                device_services = FakeDeviceServices()
+        self.device_services = device_services
+        self._device_snapshot = self.device_services.snapshot(
+            self.clock.monotonic_now())
         self.actuator = actuator
         self.perceptor = perceptor
         self.ledger = ledger
@@ -197,9 +219,10 @@ class Runner:
         # Sized in seconds, not frames: at 8 inference fps a 8-frame ring held one second
         # and rolled the award sequence away before the encounter ended.
         self._enc_ring: deque = deque(maxlen=max(8, int(cfg.infer_fps * ENCOUNTER_RING_SECONDS)))
+        initial_active = float(self.clock.active_now())
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
-                               state_since=time.perf_counter(), now=time.perf_counter())
-        self.ctx.last_map_ts = time.perf_counter()
+                               state_since=initial_active, now=initial_active)
+        self.ctx.last_map_ts = initial_active
         # A standing fact about the run, so a pure handler can tell "no view this tick"
         # from "there will never be a view" - see `fsm.Context.tree_available` and
         # `fsm.Preflight._autowalk_open`, the one place the difference is worth 30s.
@@ -212,7 +235,7 @@ class Runner:
         # sent: --replay swaps in a NullActuator regardless of cfg.dry_run.
         self.stats = SessionStats(dry_run=bool(getattr(actuator, "dry_run", False)
                                                or cfg.dry_run))
-        self._next_report = self.stats.started + REPORT_EVERY
+        self._next_report = self.ctx.now + REPORT_EVERY
         self._trace = open(trace_path, "a", buffering=1) if trace_path else None
         self._stop = False
         self._halt_reason: Optional[str] = None
@@ -223,14 +246,30 @@ class Runner:
         self._ticks = 0
         self._fps = 0.0
         self._last_frame: Optional[Frame] = None
+        self._capture_epoch: Optional[int] = None
         self._last_hud = None          # last rendered HUD image, reused between inferences
         self._last_obs: Optional[Observation] = None
         self._last_shown = 0.0
-        self._real = time.perf_counter()   # loop's real-clock sample; paces display + fps
+        self._real = float(self.clock.monotonic_now())
         self._shown_hud = 0
         self._shown_raw = 0
 
     # ---------------------------------------------------------------- state
+
+    def _validate_frame_identity(self, frame: Frame) -> None:
+        """Fail closed when a production frame lacks Runner-owned capture identity."""
+        if not getattr(self.source, "identity_required", False):
+            return
+        ref = frame.frame_ref
+        if (ref is None or ref.run_id != self.run_id or ref.seq != frame.seq
+                or float(ref.captured_mono_s) != frame.ts
+                or ref.capture_epoch != getattr(self.source, "capture_epoch", 0)):
+            raise ValueError("capture frame has missing or mismatched identity")
+
+    def _validate_observation_identity(self, frame: Frame, obs: Observation) -> None:
+        if getattr(self.source, "identity_required", False) \
+                and obs.frame_ref != frame.frame_ref:
+            raise ValueError("observation did not preserve capture identity")
 
     def enter_state(self, to: BotState, outcome: IntentOutcome, reason: str) -> None:
         """The single writer of `state`.
@@ -493,6 +532,31 @@ class Runner:
         self._resolve_intent(self.ctx.intent, IntentOutcome.EXPIRED)
         self.ctx.intent = None
 
+    def _on_capture_epoch(self, epoch: int) -> None:
+        """Invalidate temporal state and pending evidence at a source discontinuity."""
+        if self._capture_epoch is None:
+            self._capture_epoch = epoch
+            return
+        if epoch < self._capture_epoch:
+            raise ValueError("capture epoch regressed within a run")
+        if epoch == self._capture_epoch:
+            return
+        self._capture_epoch = epoch
+        self._abandon_intent("capture epoch changed")
+        reset = getattr(self.perceptor, "reset_temporal_state", None)
+        if reset is not None:
+            reset()
+        clear = getattr(self.ledger, "clear_staged", None)
+        if clear is not None:
+            clear()
+        self._enc_ring.clear()
+        self._last_obs = None
+        self._last_frame = None
+        self.ctx.cooldowns.clear()
+        self.ctx.last_map_ts = self.ctx.now
+        self.ctx.app_foreground = Tristate.UNKNOWN
+        self._foreground_checked_at = -1e9
+
     def _sync_pause(self, real: Optional[float] = None) -> bool:
         """Enter or leave the paused state. Returns whether we are paused now.
 
@@ -510,17 +574,19 @@ class Runner:
         display refresh, the fps window - must stay on the real clock: a frozen `now` never
         reaches its own `next_infer`, so driving the schedule from it stops the loop dead.
         """
-        real = time.perf_counter() if real is None else real
+        real = float(self.clock.monotonic_now()) if real is None else real
         want = self._pause_wanted()      # one stat() of the pause file per iteration
         if want and not self._paused:
             self._paused = True
             self._paused_at = real
+            self.clock.set_paused(True, at=MonotonicSeconds(real))
             self._abandon_intent("paused before the screen answered")
             log.warning("PAUSED - no taps will be sent. %s",
                         "delete the pause file to resume" if self.pause_file
                         else "send SIGUSR1 again to resume")
         elif not want and self._paused:
             self._paused = False
+            self.clock.set_paused(False, at=MonotonicSeconds(real))
             self._pause_total += real - self._paused_at
             self.stats.paused_seconds = self._pause_total
             log.info("resumed after %.0fs paused", real - self._paused_at)
@@ -624,14 +690,7 @@ class Runner:
         if real - self._foreground_checked_at < FOREGROUND_CHECK:
             return
         self._foreground_checked_at = real
-        try:
-            # The Actuator is the one thing that knows which device this run drives; read
-            # it defensively because the test doubles are not Actuators.
-            serial = getattr(self.actuator, "serial", None)
-            up = device.app_foreground(self.cfg.app_package, serial=serial)
-        except Exception:
-            return
-        self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
+        self.ctx.app_foreground = self._device_snapshot.foreground
 
     def _go_home(self) -> None:
         """Put the new account back on the spot the run was started from.
@@ -874,7 +933,7 @@ class Runner:
         if real - self._accounts_read_at < (ACCOUNTS_REFRESH if driving
                                             else RECOVER_ACCOUNTS_REFRESH):
             return
-        t0 = time.perf_counter()
+        t0 = float(self.clock.monotonic_now())
         try:
             self.ctx.accounts = self.tree_reader.read()
         except Exception:
@@ -889,7 +948,7 @@ class Runner:
             # after every interval of not seeing it. Expressed as an offset from `real` -
             # the loop's single clock sample, passed in - rather than a fresh
             # perf_counter, so this method still takes its clock as an argument.
-            self._accounts_read_at = real + (time.perf_counter() - t0)
+            self._accounts_read_at = real + (float(self.clock.monotonic_now()) - t0)
         if not driving:
             # The rest belongs to a run that is driving the overlay itself. `_last_seen_active`
             # is the record of who the tree named during a switch ATTEMPT and is spent by
@@ -1191,16 +1250,12 @@ class Runner:
                 append_session(self.stats_path, old.summary())
             except Exception:
                 log.exception("could not append the outgoing session")
-        # `paused_seconds` has to carry forward: the FSM clock is `real - paused_seconds`,
-        # so zeroing it would jump `now` forward by the whole pause total and fire every
-        # stored deadline at once. That means `started` must be on the same clock, which is
-        # exactly `ctx.now` - with `perf_counter()` instead, the new session's uptime reads
-        # short by every pause taken BEFORE the switch, and below RATE_MIN_UPTIME every
-        # per-account rate then reports as unknown, which is the whole point of the split.
-        self.stats = SessionStats(started=self.ctx.now, dry_run=old.dry_run, account=name)
+        # SessionStats uses the process monotonic clock. Context deadlines use the
+        # pause-adjusted run-relative clock and remain a separate time domain.
+        self.stats = SessionStats(started=time.perf_counter(), dry_run=old.dry_run, account=name)
         self.notifier.switched(name)
         self.stats.paused_seconds = old.paused_seconds
-        self._next_report = self.stats.started + REPORT_EVERY
+        self._next_report = self.ctx.now + REPORT_EVERY
         if self.dashboard is not None:
             # The dashboard holds the counters object, not the runner, so a TUI that is not
             # re-pointed keeps rendering the session that just ended.
@@ -1406,7 +1461,7 @@ class Runner:
         cfg = self.cfg
         next_infer = 0.0
         frames = 0
-        t0 = time.perf_counter()
+        t0 = float(self.clock.monotonic_now())
         consecutive_errors = 0
         window = "PoGoBot"
         if self.display:
@@ -1456,10 +1511,16 @@ class Runner:
                 # expires while idle. Pacing off `now` deadlocks the loop: it is frozen,
                 # so `now < next_infer` stays true forever and neither perception nor
                 # waitKey ever runs again - which also made the p and q keys dead.
-                self._real = real = time.perf_counter()
+                self._real = real = float(self.clock.monotonic_now())
                 paused = self._sync_pause(real)
-                now = real - self.stats.paused_seconds
+                now = float(self.clock.active_now())
                 self.ctx.now = now
+                self._device_snapshot = self.device_services.snapshot(
+                    MonotonicSeconds(real))
+
+                if self._device_snapshot.online is Tristate.FALSE:
+                    self._halt("device services report the device offline")
+                    break
 
                 if not self.source.healthy():
                     reason = getattr(self.source, "failure_reason", lambda: "")() or ""
@@ -1506,13 +1567,30 @@ class Runner:
                         break
                     continue
 
+                try:
+                    self._validate_frame_identity(frame)
+                    if frame.frame_ref is not None:
+                        self._on_capture_epoch(frame.frame_ref.capture_epoch)
+                except ValueError as exc:
+                    self._halt(str(exc))
+                    break
+
                 frames += 1
                 self._last_frame = frame
                 next_infer = real + 1.0 / max(cfg.infer_fps, 0.1)
 
-                kbd = self.keyboard.state if self.keyboard else Tristate.UNKNOWN
+                kbd = self._device_snapshot.keyboard
+                if kbd is Tristate.UNKNOWN and self.keyboard is not None:
+                    # Compatibility adapter for legacy callers. CLI composition passes
+                    # DeviceServices directly and does not start a second poller.
+                    kbd = self.keyboard.state
                 try:
                     obs = self.perceptor.observe(frame, keyboard=kbd)
+                    try:
+                        self._validate_observation_identity(frame, obs)
+                    except ValueError as exc:
+                        self._halt(str(exc))
+                        break
                     consecutive_errors = 0
                 except Exception:
                     consecutive_errors += 1
@@ -1710,6 +1788,7 @@ class Runner:
         try:
             for closer in (getattr(self.source, "release", None),
                            getattr(self.actuator, "close", None),
+                           getattr(self.device_services, "close", None),
                            getattr(self.keyboard, "stop", None),
                            getattr(self.ledger, "close", None)):
                 if closer:
@@ -1750,3 +1829,4 @@ class Runner:
                 log.exception("could not close Discord notifications")
         if self.quota is not None:
             log.info("%s", self.quota.state(account=self.stats.account).line())
+
