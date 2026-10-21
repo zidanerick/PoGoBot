@@ -1,9 +1,16 @@
 from dataclasses import dataclass
+from enum import Enum
 import pytest
 
 from pogobot.evidence_adapter import EvidenceAdapter
 from pogobot.frames import Frame
-from pogobot.observation import Detection, Observation, ScreenGuess, Signal, Tristate
+from pogobot.observation import Detection, Observation, ScreenGuess, Signal
+
+
+class T01Tristate(Enum):
+    TRUE = "TRUE"
+    FALSE = "FALSE"
+    UNKNOWN = "UNKNOWN"
 
 
 @dataclass(frozen=True)
@@ -18,7 +25,7 @@ class FrameRef:
 class Evidence:
     frame_ref: FrameRef
     kind: str
-    value: Tristate
+    value: T01Tristate
     confidence: float | None
     source: str
     region_xyxyn: tuple[float, float, float, float] | None
@@ -45,7 +52,7 @@ def _inputs(*, seq=7, ts=12.5, frame_ref=None, detections=()):
 
 @pytest.fixture
 def adapter():
-    return EvidenceAdapter(Evidence, Tristate)
+    return EvidenceAdapter(Evidence, T01Tristate)
 
 
 def test_signal_adapts_boolean_without_treating_optical_score_as_confidence(adapter):
@@ -61,7 +68,7 @@ def test_signal_adapts_boolean_without_treating_optical_score_as_confidence(adap
         source="legacy-optical",
     )
 
-    assert evidence == Evidence(frame_ref, "map_ball_visible", Tristate.TRUE,
+    assert evidence == Evidence(frame_ref, "map_ball_visible", T01Tristate.TRUE,
                                 None, "legacy-optical", None)
     assert evidence.frame_ref is frame_ref
 
@@ -79,7 +86,7 @@ def test_detection_adapts_normalized_region_and_preserves_exact_frame_ref(adapte
         source="detector-v1",
     )
 
-    assert evidence == Evidence(frame_ref, "pokemon", Tristate.TRUE, 0.8,
+    assert evidence == Evidence(frame_ref, "pokemon", T01Tristate.TRUE, 0.8,
                                 "detector-v1", (0.25, 0.25, 0.75, 0.75))
     assert evidence.frame_ref is frame_ref
 
