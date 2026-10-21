@@ -32,20 +32,30 @@ class Clock(Protocol):
     def monotonic_now(self) -> MonotonicSeconds: ...
     def active_now(self) -> ActiveSeconds: ...
     def set_paused(self, paused: bool, *, at: MonotonicSeconds) -> None: ...
+    def monotonic_at(self, physical_s: float) -> MonotonicSeconds: ...
 
 
 class SystemClock:
-    """Clock with an injectable physical source and deterministic pause accounting."""
+    """Clock with a run-relative origin and deterministic pause accounting."""
 
-    def __init__(self, source: Callable[[], float]):
+    def __init__(self, source: Callable[[], float], *, origin: float | None = None):
         self._source = source
-        self._origin = float(source())
+        self._origin = float(source()) if origin is None else float(origin)
         self._paused_total = 0.0
         self._paused_at: float | None = None
         self._last_transition = 0.0
 
     def monotonic_now(self) -> MonotonicSeconds:
         return MonotonicSeconds(float(self._source()) - self._origin)
+
+    def monotonic_at(self, physical_s: float) -> MonotonicSeconds:
+        """Translate one perf-counter sample into this run's monotonic domain."""
+        return MonotonicSeconds(float(physical_s) - self._origin)
+
+    @property
+    def physical_origin(self) -> float:
+        """Internal capture adapter seam; never serialize this process timestamp."""
+        return self._origin
 
     def active_now(self) -> ActiveSeconds:
         mono = float(self.monotonic_now())
