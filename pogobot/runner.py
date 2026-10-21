@@ -192,7 +192,9 @@ class Runner:
         # not refreshed because it cannot be: outside a switch the panel is shut and the
         # tree lists no rows at all, so a live read would only ever shrink this to nothing.
         self.roster = tuple(roster)
-        self._accounts_read_at = 0.0
+        # Run-relative monotonic time starts near zero, so zero would throttle the
+        # first account-tree read. Use an explicit never-read sentinel.
+        self._accounts_read_at = float("-inf")
         #: whether the startup preflight has already been started for the game currently
         #: running (see `_maybe_preflight`). A latch, not a counter: it is set the first
         #: time the attempt is made, so a preflight that could not finish is still not
@@ -930,8 +932,12 @@ class Runner:
         if self.tree_reader is None \
                 or not (driving or self.ctx.state is BotState.RECOVERING):
             return
-        if real - self._accounts_read_at < (ACCOUNTS_REFRESH if driving
-                                            else RECOVER_ACCOUNTS_REFRESH):
+        # Zero is also treated as the legacy never-read sentinel used by focused
+        # tests and older integrations. Runtime reads are run-relative, where a
+        # fresh run's first sample can be close to zero.
+        if self._accounts_read_at > 0.0 and \
+                real - self._accounts_read_at < (ACCOUNTS_REFRESH if driving
+                                                 else RECOVER_ACCOUNTS_REFRESH):
             return
         t0 = float(self.clock.monotonic_now())
         try:
@@ -1250,11 +1256,11 @@ class Runner:
                 append_session(self.stats_path, old.summary())
             except Exception:
                 log.exception("could not append the outgoing session")
-        # SessionStats uses the process monotonic clock. Context deadlines use the
-        # pause-adjusted run-relative clock and remain a separate time domain.
+        # SessionStats uses process-monotonic time, while Context uses the
+        # pause-adjusted run-relative clock. A new account starts a fresh stats
+        # interval, so pauses charged to the outgoing account must not carry over.
         self.stats = SessionStats(started=time.perf_counter(), dry_run=old.dry_run, account=name)
         self.notifier.switched(name)
-        self.stats.paused_seconds = old.paused_seconds
         self._next_report = self.ctx.now + REPORT_EVERY
         if self.dashboard is not None:
             # The dashboard holds the counters object, not the runner, so a TUI that is not
