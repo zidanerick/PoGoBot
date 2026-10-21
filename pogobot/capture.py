@@ -29,6 +29,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from uuid import uuid4
 from pathlib import Path
 from typing import IO, Optional, Sequence
 
@@ -36,6 +37,7 @@ import cv2
 import numpy as np
 
 from .config import Config
+from .contracts import FrameRef, MonotonicSeconds
 from .frames import Frame
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
@@ -138,6 +140,8 @@ class ScrcpySource:
         self._release_lock = threading.Lock()
         self._released = False
 
+        self._run_id = str(uuid4())
+        self._capture_epoch = 0
         self._latest: Optional[np.ndarray] = None
         self._latest_seq = 0
         self._latest_ts = 0.0
@@ -171,7 +175,9 @@ class ScrcpySource:
             return None
         if time.perf_counter() - ts > self.cfg.timings.frame_max_age:
             return None
-        return Frame(seq=seq, ts=ts, bgr=bgr.copy())
+        return Frame(seq=seq, ts=ts, bgr=bgr.copy(),
+                     frame_ref=FrameRef(self._run_id, self._capture_epoch, seq,
+                                         MonotonicSeconds(ts)))
 
     def healthy(self) -> bool:
         if self._released or self._reader_error is not None:
@@ -398,6 +404,8 @@ class ReplaySource:
 
     def __init__(self, directory: Path | str, interval: float = 0.0, loop: bool = False,
                  suffixes: Sequence[str] = IMAGE_SUFFIXES) -> None:
+        self._run_id = str(uuid4())
+        self._capture_epoch = 0
         self.directory = Path(directory)
         if not self.directory.is_dir():
             raise CaptureError(f"replay directory does not exist: {self.directory}")
@@ -440,7 +448,10 @@ class ReplaySource:
                     self._index = 0
                 else:
                     self._exhausted = True
-            return Frame(seq=self._seq, ts=time.perf_counter(), bgr=bgr)
+            captured = time.perf_counter()
+            return Frame(seq=self._seq, ts=captured, bgr=bgr,
+                         frame_ref=FrameRef(self._run_id, self._capture_epoch, self._seq,
+                                            MonotonicSeconds(captured)))
 
         self._exhausted = True
         return None
