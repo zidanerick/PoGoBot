@@ -29,7 +29,6 @@ import subprocess
 import tempfile
 import threading
 import time
-from uuid import uuid4
 from pathlib import Path
 from typing import IO, Optional, Sequence
 
@@ -37,7 +36,7 @@ import cv2
 import numpy as np
 
 from .config import Config
-from .contracts import FrameRef, MonotonicSeconds
+from .contracts import Clock, FrameRef, MonotonicSeconds
 from .frames import Frame
 
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
@@ -120,6 +119,8 @@ def _unblock_open(thread: threading.Thread, path: Path, budget: float = 1.0) -> 
 class ScrcpySource:
     #: reading does not consume: the reader thread keeps only the newest frame
     sequential = False
+    identity_required = True
+    is_live = True
 
     """Live capture from scrcpy recording into a private FIFO.
 
@@ -131,6 +132,10 @@ class ScrcpySource:
     def __init__(self, cfg: Config, serial: Optional[str] = None,
                  start_timeout: float = 12.0, binary: Optional[str] = None) -> None:
         self.cfg = cfg
+        self.monotonic_origin = time.perf_counter()
+        self._run_id: Optional[str] = None
+        self._clock: Optional[Clock] = None
+        self._capture_epoch = 0
         self._dir = Path(tempfile.mkdtemp(prefix="pogobot-capture-"))
         self._fifo = self._dir / "stream.mkv"
         self._stderr_path = self._dir / "scrcpy.stderr"
@@ -145,6 +150,7 @@ class ScrcpySource:
         self._latest: Optional[np.ndarray] = None
         self._latest_seq = 0
         self._latest_ts = 0.0
+        self._latest_epoch = 0
         self._seq = 0
         self._reader_error: Optional[str] = None
 
@@ -170,14 +176,51 @@ class ScrcpySource:
     def read(self) -> Optional[Frame]:
         """The newest frame, or None when there is none or it has gone stale."""
         with self._lock:
-            bgr, seq, ts = self._latest, self._latest_seq, self._latest_ts
+            bgr, seq, ts, epoch = (self._latest, self._latest_seq,
+                                   self._latest_ts, self._latest_epoch)
         if bgr is None:
             return None
         if time.perf_counter() - ts > self.cfg.timings.frame_max_age:
             return None
-        return Frame(seq=seq, ts=ts, bgr=bgr.copy(),
-                     frame_ref=FrameRef(self._run_id, self._capture_epoch, seq,
-                                         MonotonicSeconds(ts)))
+        if self._clock is None or self._run_id is None or epoch != self._capture_epoch:
+            return Frame(seq=seq, ts=ts, bgr=bgr.copy(), captured_perf_s=ts)
+        captured = self._clock.monotonic_at(ts)
+        ref = FrameRef(self._run_id, epoch, seq, captured)
+        return Frame(seq=seq, ts=float(captured), bgr=bgr.copy(), frame_ref=ref,
+                     captured_perf_s=ts)
+
+    def bind_run(self, run_id: str, clock: Clock) -> None:
+        """Bind Runner-owned identity and clock before the first frame is consumed."""
+        if not run_id:
+            raise ValueError("run_id must be nonempty")
+        with self._lock:
+            if self._run_id is not None and self._run_id != run_id:
+                raise RuntimeError("capture source is already bound to another run")
+            self._run_id = run_id
+            self._clock = clock
+
+    @property
+    def capture_epoch(self) -> int:
+        return self._capture_epoch
+
+    def advance_epoch(self, reason: str) -> int:
+        """Invalidate buffered frames after source reset or reconnect."""
+        if not reason.strip():
+            raise ValueError("epoch advancement requires a reason")
+        with self._lock:
+            self._capture_epoch += 1
+            self._seq = 0
+            self._latest = None
+            self._latest_seq = 0
+            self._latest_ts = 0.0
+            self._latest_epoch = self._capture_epoch
+            return self._capture_epoch
+
+    def reset(self) -> int:
+        return self.advance_epoch("capture reset")
+
+    def reconnected(self) -> int:
+        return self.advance_epoch("capture reconnect")
 
     def healthy(self) -> bool:
         if self._released or self._reader_error is not None:
@@ -363,6 +406,7 @@ class ScrcpySource:
                 self._latest = bgr
                 self._latest_seq = self._seq
                 self._latest_ts = time.perf_counter()
+                self._latest_epoch = self._capture_epoch
 
 
 def _natural_key(path: Path) -> tuple:
@@ -389,6 +433,8 @@ def _natural_key(path: Path) -> tuple:
 class ReplaySource:
     #: reading advances through the directory, so the display must not pull frames
     sequential = True
+    identity_required = True
+    is_replay = True
 
     """Frames from a directory of images, in name order.
 
@@ -404,7 +450,9 @@ class ReplaySource:
 
     def __init__(self, directory: Path | str, interval: float = 0.0, loop: bool = False,
                  suffixes: Sequence[str] = IMAGE_SUFFIXES) -> None:
-        self._run_id = str(uuid4())
+        self.monotonic_origin = time.perf_counter()
+        self._run_id: Optional[str] = None
+        self._clock: Optional[Clock] = None
         self._capture_epoch = 0
         self.directory = Path(directory)
         if not self.directory.is_dir():
@@ -449,9 +497,12 @@ class ReplaySource:
                 else:
                     self._exhausted = True
             captured = time.perf_counter()
-            return Frame(seq=self._seq, ts=captured, bgr=bgr,
-                         frame_ref=FrameRef(self._run_id, self._capture_epoch, self._seq,
-                                            MonotonicSeconds(captured)))
+            if self._clock is None or self._run_id is None:
+                return Frame(seq=self._seq, ts=captured, bgr=bgr, captured_perf_s=captured)
+            relative = self._clock.monotonic_at(captured)
+            ref = FrameRef(self._run_id, self._capture_epoch, self._seq, relative)
+            return Frame(seq=self._seq, ts=float(relative), bgr=bgr, frame_ref=ref,
+                         captured_perf_s=captured)
 
         self._exhausted = True
         return None
@@ -461,6 +512,37 @@ class ReplaySource:
 
     def release(self) -> None:
         self._released = True
+
+    def bind_run(self, run_id: str, clock: Clock) -> None:
+        if not run_id:
+            raise ValueError("run_id must be nonempty")
+        if self._run_id is not None and self._run_id != run_id:
+            raise RuntimeError("capture source is already bound to another run")
+        self._run_id = run_id
+        self._clock = clock
+
+    @property
+    def capture_epoch(self) -> int:
+        return self._capture_epoch
+
+    def advance_epoch(self, reason: str) -> int:
+        if not reason.strip():
+            raise ValueError("epoch advancement requires a reason")
+        self._capture_epoch += 1
+        self._seq = 0
+        return self._capture_epoch
+
+    def seek(self, index: int) -> None:
+        if not 0 <= index < len(self.paths):
+            raise ValueError("seek index is outside the replay frame list")
+        self.advance_epoch("replay seek")
+        self._index = index
+        self._exhausted = False
+        self._current = None
+
+    def reset(self) -> int:
+        self.seek(0)
+        return self._capture_epoch
 
     @property
     def current_path(self) -> Optional[Path]:
