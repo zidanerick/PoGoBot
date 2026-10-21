@@ -11,10 +11,11 @@ Workflow:
   1. Run the bot. Frames land in datasets/active_v2/review/{images,labels}/.
   2. Fix the labels by hand (Roboflow, labelImg, whatever) - this is the step that
      actually adds information the model does not already have.
-  3. Run this script to move the reviewed pairs into a dated training split.
+  3. Record exhaustive approval and hashes in a schema-v1 manifest, then copy approved train pairs.
+     See docs/PERCEPTION_EVALUATION.md. --yes never substitutes for sample review.
 
   python3 tools/promote_reviewed.py --list          # what is waiting, worst first
-  python3 tools/promote_reviewed.py --promote       # move reviewed pairs into train/
+  python3 tools/promote_reviewed.py --promote       # copy approved train pairs into train/
 """
 
 from __future__ import annotations
@@ -22,7 +23,11 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import sys
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from pogobot.evaluation import load_manifest, local_path
 
 BASE = Path(__file__).resolve().parent.parent
 REVIEW = BASE / "datasets" / "active_v2"
@@ -75,23 +80,89 @@ def cmd_list() -> int:
     return 0
 
 
-def cmd_promote(dest: Path, yes: bool) -> int:
-    ps = pairs()
-    if not ps:
-        print("nothing to promote")
+def cmd_promote(dest: Path, yes: bool, review_manifest: Path | None = None) -> int:
+    """Copy only reviewed train samples, retaining source evidence and provenance."""
+    source = review_manifest or REVIEW / "review_manifest.json"
+    try:
+        doc = load_manifest(source)
+        rows = [row for row in doc["samples"] if row["split"] == "train"]
+        if not rows:
+            raise ValueError("no reviewed train samples; held-out samples cannot be promoted")
+        provenance = dest / "review_manifest.json"
+        existing = load_manifest(provenance) if provenance.exists() else None
+        if existing and existing["classes"] != doc["classes"]:
+            raise ValueError("destination class mapping differs")
+        if existing is not None and "recording_splits" not in existing:
+            raise ValueError("destination provenance lacks recording_splits; add the complete historical assignment registry before promoting")
+        if not existing and dest.exists() and any(dest.iterdir()):
+            raise ValueError("nonempty destination has no reviewed provenance manifest; migrate explicitly")
+        previous = existing["samples"] if existing else []
+        ids = {r["id"] for r in previous}
+        hashes = {r["review"]["image_sha256"] for r in previous}
+        # Keep assignments for every recording, including validation/test recordings
+        # omitted by a later source manifest. Never infer a new split for a known ID.
+        assignments = dict(existing.get("recording_splits", {})) if existing else {}
+        for recording, split in doc.get("recording_splits", {}).items():
+            if recording in assignments and assignments[recording] != split:
+                raise ValueError(f"immutable recording split changed: {recording} was {assignments[recording]}, now {split}")
+            assignments[recording] = split
+        for row in doc["samples"]:
+            recording, split = row["recording_id"], row["split"]
+            if recording in assignments and assignments[recording] != split:
+                raise ValueError(f"immutable recording split changed: {recording} was {assignments[recording]}, now {split}")
+            assignments[recording] = split
+        jobs, exported = [], []
+        targets = set()
+        for row in rows:
+            if row["id"] in ids or row["review"]["image_sha256"] in hashes:
+                raise ValueError("sample already promoted")
+            if Path(row["image"]).stem != Path(row["labels"]).stem:
+                raise ValueError(f"{row['id']}: image and label stems must match for YOLO pairing")
+            out = dict(row)
+            for field, folder in (("image", "images"), ("labels", "labels")):
+                src = local_path(source.parent, row[field])
+                relative = str(Path(folder) / src.name)
+                target = dest / relative
+                if target.exists() or target in targets:
+                    raise ValueError(f"destination collision: {target}")
+                targets.add(target)
+                jobs.append((src, target))
+                out[field] = relative
+            exported.append(out)
+        print(f"{len(rows)} approved training pairs -> {dest}")
+        if not yes:
+            print("Validated preview. Use --yes to copy; source evidence is retained.")
+            return 0
+        dest.mkdir(parents=True, exist_ok=True)
+        created = []
+        try:
+            for src, target in jobs:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with target.open("xb") as output:
+                    created.append(target)
+                    with src.open("rb") as input_file:
+                        shutil.copyfileobj(input_file, output)
+            updated = {"schema_version": 1, "classes": doc["classes"],
+                       "recording_splits": dict(sorted(assignments.items())),
+                       "samples": previous + exported}
+            pending = dest / "review_manifest.pending.json"
+            if pending.exists():
+                raise ValueError("pending manifest exists; inspect previous interrupted promotion")
+            with pending.open("x") as output:
+                created.append(pending)
+                json.dump(updated, output, indent=2)
+                output.write("\n")
+            load_manifest(pending)  # verify copied files before publishing provenance
+            pending.replace(provenance)
+        except Exception:
+            for file in reversed(created):
+                file.unlink(missing_ok=True)
+            raise
+        print(f"copied {len(rows)} pairs with reviewed provenance")
         return 0
-    print(f"About to move {len(ps)} image/label pairs into {dest}")
-    print("Only do this AFTER you have corrected the labels by hand.")
-    if not yes:
-        print("Re-run with --yes to actually move them.")
-        return 0
-    (dest / "images").mkdir(parents=True, exist_ok=True)
-    (dest / "labels").mkdir(parents=True, exist_ok=True)
-    for img, lbl in ps:
-        shutil.move(str(img), dest / "images" / img.name)
-        shutil.move(str(lbl), dest / "labels" / lbl.name)
-    print(f"moved {len(ps)} pairs")
-    return 0
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        print(f"promotion refused: {exc}")
+        return 2
 
 
 def main() -> int:
@@ -100,10 +171,11 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="show the queue, worst first")
     ap.add_argument("--promote", action="store_true")
     ap.add_argument("--dest", type=Path, default=BASE / "datasets" / "det_v3" / "train")
-    ap.add_argument("--yes", action="store_true", help="actually move the files")
+    ap.add_argument("--yes", action="store_true", help="copy approved training files")
+    ap.add_argument("--manifest", type=Path, help="reviewed dataset registry (schema v1)")
     a = ap.parse_args()
     if a.promote:
-        return cmd_promote(a.dest, a.yes)
+        return cmd_promote(a.dest, a.yes, a.manifest)
     return cmd_list()
 
 

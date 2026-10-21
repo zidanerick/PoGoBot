@@ -1,17 +1,13 @@
-<div align="center">
-
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png">
-  <img src="assets/logo-light.png" alt="PoGoBot: Pokémon GO Vision Bot" width="440">
-</picture>
+# PoGoBot
 
 ### A computer-vision bot for Pokémon GO
+
+![PoGoBot: Pokémon GO Vision Bot](assets/logo-light.png)
 
 [![Version](https://img.shields.io/badge/version-2.0.0-blue?style=flat-square)](https://github.com/1tzkaos/PoGoBot/releases/tag/v2.0.0)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-lightgrey?style=flat-square&logo=android&logoColor=white)](#requirements)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen?style=flat-square&logo=pytest&logoColor=white)](#development)
-[![Detector recall](https://img.shields.io/badge/detector%20recall-75.9%25-brightgreen?style=flat-square)](#models)
 [![YOLOv8](https://img.shields.io/badge/YOLOv8-ultralytics-orange?style=flat-square)](https://github.com/ultralytics/ultralytics)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
@@ -20,11 +16,9 @@
 Reads the screen over `scrcpy`, finds targets with YOLOv8, decides with a pure state
 machine, and acts through `adb`.
 
-<img src="assets/demo.gif" width="300" alt="PoGoBot running: the HUD shows live YOLOv8 detections with confidences, the interaction range, and the state machine moving through SCANNING, TARGETING and ENCOUNTER">
+![PoGoBot running: the HUD shows detections, interaction range and state transitions](assets/demo.gif)
 
-<sub>Live capture. The HUD is the bot's own preview: detection boxes and confidences, the reach ellipse it will act inside, the screen classifier's verdict, and the raw signals behind every decision.</sub>
-
-</div>
+*Live capture. The HUD shows detection boxes and confidences, the reach ellipse, the screen classifier's verdict and the raw signals behind each decision.*
 
 ---
 
@@ -43,7 +37,7 @@ machine, and acts through `adb`.
 | Restocking | Gives up on an encounter whose throws change nothing, then switches to PokéStop-only targeting until it restocks. |
 | Account switching | Optionally logs into another PGSharp account once the current one is spun out, or on a clock. Off by default. |
 | Honest learning loop | Curates frames into a human review queue instead of training on its own guesses. |
-| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. The full suite (1030 tests) runs in about 30 seconds. |
+| Pure decision engine | `(Observation, Context) -> list[Effect]`, importable and testable without a phone, a GPU, or a model. |
 
 ### Failsafes and safety
 
@@ -238,45 +232,20 @@ Every optical threshold is a **fraction of its region's area**, never a pixel co
 changing `--max-size` cannot silently disable a check. Buttons are **located, never
 assumed**: every finder returns `Optional`, and no located button means no tap.
 
-Calibrated against 235 labelled frames:
-
-| signal | behaviour |
-|---|---|
-| map: red Pokéball **and** orange binoculars | 79% recall, ~0% false positive → used as a precision-first veto |
-| close button | 93% on menu screens, 1% on encounters |
-| affirmative pill | 100% on the Rocket BATTLE / party screens, 4% on menus |
-
-The classifier answers what optics cannot, behind those vetoes. Over 321 real frames it
-agrees with the optical map signal 97.9% of the time.
+The screen classifier answers what optics cannot, behind those vetoes. The reviewed
+calibration corpus is not included in this checkout, so no current classifier accuracy is
+claimed. See [Perception evaluation](docs/PERCEPTION_EVALUATION.md) for the review and
+measurement requirements.
 
 ## Models
 
-Trained on `det_v3` (186/21/11 images, 4 classes), verified to have no cross-split
-leakage, no duplicate images, and no empty label files.
-
-| detector | size | class-agnostic recall | mAP50 |
-|---|---|---|---|
-| previous | 6 MB | 23.3% | not measurable: its validation set was leaked |
-| **`yolov8n`** (shipped) | **6 MB** | **69.2%** | 0.494 |
-| `yolov8s` (opt-in) | 85 MB | **75.9%** | **0.601** |
-
-Only the compact model is committed; an 85 MB weight file is not something every clone
-should download. The bot automatically prefers `models/v3/det_s/weights/best.pt` when it
-exists, so the larger model is opt-in.
-
-```bash
-python3 tools/adopt_best_detector.py             # compare candidates on held-out val
-python3 tools/adopt_best_detector.py --install   # install the winner
-```
-
-It ranks by class-agnostic localization recall rather than mAP, because candidates have
-different class counts and what the bot needs is *did it find the object at all*.
-
-Per-class mAP50 for `yolov8s`: pokemon 0.778, gym 0.630, pokestop_rocket 0.578,
-pokestop 0.417.
-
-The screen classifier is 5-class (Overworld / PokemonEncounter / Menu / Poi / Rocket)
-and scores 100% on its held-out split.
+The bot uses a compact YOLOv8 checkpoint by default and can use the optional larger
+checkpoint when it is present. The validation corpus needed to measure either detector
+or the screen classifier is not included here, so this README makes no model accuracy
+claim. The former recall-only selector could install a checkpoint while ignoring class
+mistakes and false positives, so it is retired. Use the reviewed-manifest evaluator in
+[`docs/PERCEPTION_EVALUATION.md`](docs/PERCEPTION_EVALUATION.md) to report metrics; it
+does not change deployed weights.
 
 ## Learning
 
@@ -288,11 +257,13 @@ objects it was **unsure** about first.
 ```bash
 python3 tools/promote_reviewed.py --list          # the queue, most informative first
 #   ... correct the labels by hand ...
-python3 tools/promote_reviewed.py --promote --yes
+python3 tools/promote_reviewed.py --promote --manifest datasets/reviewed/manifest.json
+python3 tools/promote_reviewed.py --promote --manifest datasets/reviewed/manifest.json --yes
 ```
 
-Training on unreviewed model output is self-training, which measurably degraded the
-previous detector: 3.23 → 2.38 detections per frame over three generations.
+Training on unreviewed model output can reinforce incorrect labels. Promotion requires
+exhaustive human approval tied to file hashes, keeps recording split assignments
+immutable, and copies only train pairs whose image and label filenames share a stem.
 
 ## Running out of Poké Balls
 
@@ -820,8 +791,8 @@ legacy/      previous generations, unmaintained
 
 ## Known Limitations
 
-- **PokéStop detection is the weakest class** (mAP50 0.309). Labelling more stops is the
-  highest-value improvement available.
+- **PokéStop detection needs more reviewed examples.** Add and validate labelled captures
+  before drawing conclusions about class performance.
 - **Gym screens can classify as `PokemonEncounter`**: the `Poi` class has only 8 training
   samples. The 0.60 confidence gate refuses them and the 25s encounter timeout bounds the
   cost, but it is a real gap.
