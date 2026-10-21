@@ -58,6 +58,34 @@ def test_a_game_already_in_front_is_left_alone(monkeypatch):
     assert not fake.started
 
 
+def test_startup_foreground_uses_composed_device_services(monkeypatch):
+    from pogobot.contracts import DeviceSnapshot, MonotonicSeconds
+    from pogobot.observation import Tristate
+
+    class Clock:
+        def monotonic_now(self):
+            return MonotonicSeconds(4.0)
+
+    class Services:
+        def __init__(self):
+            self.samples = []
+
+        def snapshot(self, now):
+            self.samples.append(now)
+            return DeviceSnapshot(now, Tristate.TRUE, Tristate.UNKNOWN,
+                                  Tristate.TRUE, (720, 1600))
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("startup bypassed DeviceServices for foreground reads")
+
+    services = Services()
+    monkeypatch.setattr(device, "app_foreground", forbidden)
+    monkeypatch.setattr(device.subprocess, "run", forbidden)
+    assert device.ensure_app_running("com.nianticlabs.pokemongo", "x.Main",
+                                     device_services=services, clock=Clock())
+    assert services.samples == [MonotonicSeconds(4.0)]
+
+
 def test_a_closed_game_is_started_before_capture_opens(monkeypatch):
     fake = _Fake(focus_after=1)
     monkeypatch.setattr(device.subprocess, "run", fake)
