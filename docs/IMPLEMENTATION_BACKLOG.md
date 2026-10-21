@@ -280,7 +280,7 @@ Validation on the available staged candidate files: `python -m compileall -q pog
 
 ### Proposed branch order
 
-This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `53225b30ce571d45c4a7273a3a63586f74dba365`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; the current focused gate includes the notifier regression and reports 115 passed.
+This is the ordered integration sequence, not a merge instruction. Input heads checked for this refresh are #1 `a29f1eb148c13ce42d82a7f270080e5735aadee6`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `6636a99e4701baa32c620775a9e5c15fe01ae7f8`. PR #1 remains the proposed contract source. Fail-closed UNKNOWN foreground is the accepted policy and is present in PR #3 source/tests; the current focused gate includes the notifier regression and reports 115 passed.
 
 1. **Contract review (#1)**: accept v1.1 signatures and invariants; record approval. No behavior is implemented by this documentation step.
 2. **T01 shared runtime seam (Lead owns shared files; Reliability contributes device adapter)**: implement dual clocks, DeviceServices, capture-stamped FrameRef through Frame/Observation/Evidence, replay isolation and baseline CI. PR #3 adapts to these seams.
