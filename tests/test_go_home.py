@@ -411,7 +411,8 @@ def test_runner_reports_unknown_after_favorite_tap_without_retry_or_success(capl
     """Runner polling reports an unavailable post-teleport result as failure only."""
     from dataclasses import replace
     import logging
-    from time import monotonic, sleep
+    from threading import Event
+    from time import monotonic
     from pogobot.accounts import AccountView, AsyncUiTreeReader
     from pogobot.config import DEFAULT
 
@@ -459,7 +460,7 @@ def test_runner_reports_unknown_after_favorite_tap_without_retry_or_success(capl
     deadline = monotonic() + 2
     while r._home_navigation is not None and monotonic() < deadline:
         r._poll_home_navigation()
-        sleep(0.002)
+        Event().wait(0.002)
     # A later tick must not resend the notifier after the navigation is retired.
     r._poll_home_navigation()
 
@@ -468,6 +469,118 @@ def test_runner_reports_unknown_after_favorite_tap_without_retry_or_success(capl
     assert navigator.failure == "Could not verify the saved-location tap"
     assert [event[0] for event in recorder.events] == ["switched", "problem"]
     failures = [event for event in recorder.events if event[0] == "problem"]
+    assert len(failures) == 1
+    assert failures[0][1] == "Could not return home"
+    assert "Could not verify the saved-location tap" in failures[0][2]
+    assert not any("back at " in record.getMessage() for record in caplog.records)
+    assert source.reads == 2, "one initial read and one post-tap read, with no retry"
+    assert [reason for _, _, reason in r.actuator.taps] == [
+        "home: teleport to Home Location"]
+    reader.close()
+
+
+def test_run_loop_polls_unknown_home_navigation_and_reports_once_without_retry(caplog):
+    """The real tick loop polls navigation after a confirmed account switch."""
+    from dataclasses import replace
+    import logging
+    import numpy as np
+    from threading import Event
+    from pogobot.accounts import AccountView, AsyncUiTreeReader
+    from pogobot.config import DEFAULT
+    from pogobot.effects import BotState
+    from pogobot.frames import Frame
+    from tests.factories import obs
+
+    class _ScriptedReader:
+        def __init__(self):
+            self.reads = 0
+
+        def read(self):
+            self.reads += 1
+            if self.reads == 1:
+                return _view("pgsharp_favorites")
+            return AccountView(available=False)
+
+    class _Recorder:
+        enabled = False
+
+        def __init__(self):
+            self.events = []
+
+        def problem(self, title, detail=""):
+            self.events.append(("problem", title, detail))
+
+        def switched(self, name):
+            self.events.append(("switched", name))
+
+        def started(self, **kwargs):
+            self.events.append(("started", kwargs))
+
+        def finished(self, **kwargs):
+            self.events.append(("finished", kwargs))
+
+        def halted(self, *args, **kwargs):
+            self.events.append(("halted", args, kwargs))
+
+        def close(self, timeout=5.0):
+            pass
+
+    class _Source:
+        def __init__(self):
+            self.seq = 0
+
+        def healthy(self):
+            return self.seq < 25
+
+        def read(self):
+            self.seq += 1
+            # Runner pacing is patched to a no-op in this module's fixture. Let the
+            # async UI-tree worker get scheduled between fake frames.
+            Event().wait(0.005)
+            return Frame(self.seq, self.seq / 100.0,
+                         np.zeros((20, 20, 3), dtype=np.uint8))
+
+        def release(self):
+            pass
+
+    class _Perceptor:
+        def observe(self, frame, **kwargs):
+            return obs(seq=frame.seq, ts=frame.ts)
+
+    source = _ScriptedReader()
+    reader = AsyncUiTreeReader(source)
+    recorder = _Recorder()
+    r = _runner(cfg=replace(DEFAULT, home_favorite="Home Location", infer_fps=120,
+                            preflight=False),
+                tree_reader=reader, notifier=recorder)
+    r.source = _Source()
+    r.perceptor = _Perceptor()
+    r.actuator = _Act()
+    r.ctx.state = BotState.SCANNING
+    switch_confirmations = []
+
+    def confirm_switch(_observation):
+        if not switch_confirmations:
+            switch_confirmations.append("Traveller")
+            r._on_switch_confirmed("Traveller")
+            r._home_navigation.settle = 0
+
+    r._maybe_switch = confirm_switch
+    poll_calls = []
+    poll_home_navigation = r._poll_home_navigation
+
+    def tracked_poll():
+        poll_calls.append(True)
+        poll_home_navigation()
+
+    r._poll_home_navigation = tracked_poll
+    caplog.set_level(logging.INFO)
+
+    assert r.run() == 0
+
+    failures = [event for event in recorder.events if event[0] == "problem"]
+    assert switch_confirmations == ["Traveller"]
+    assert len(poll_calls) == r._ticks >= 3
     assert len(failures) == 1
     assert failures[0][1] == "Could not return home"
     assert "Could not verify the saved-location tap" in failures[0][2]
