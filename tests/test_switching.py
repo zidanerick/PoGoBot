@@ -14,6 +14,7 @@ from pogobot.effects import (
     Tap,
     Transition,
 )
+from pogobot.observation import Tristate
 from tests.factories import obs
 
 
@@ -38,7 +39,8 @@ def budget(seconds: float) -> Config:
 
 def ctx(**kw):
     c = fsm.Context(cfg=kw.pop("cfg", Config()), state=BotState.SWITCHING,
-                    now=100.0, state_since=100.0)
+                    now=100.0, state_since=100.0,
+                    app_foreground=Tristate.TRUE)
     c.switch_target = kw.pop("target", "TrainerTwo")
     c.switch_phase = kw.pop("phase", "open")
     c.accounts = kw.pop("accounts", panel())

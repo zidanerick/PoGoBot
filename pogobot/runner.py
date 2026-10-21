@@ -23,6 +23,7 @@ from .effects import (
     BotState,
     ClearSpatialMemory,
     Cooldown,
+    DoubleTapDrag,
     ForegroundApp,
     Pinch,
     Effect,
@@ -59,9 +60,8 @@ REPORT_EVERY = 300.0
 # ball wobble, "Gotcha!", then the XP/candy/stardust award - runs several seconds.
 ENCOUNTER_RING_SECONDS = 6.0
 
-# How often the account list is re-read while a switch is in flight. The dump blocks for
-# roughly a second, so this is as often as the loop can afford; it is also why the read
-# happens during a switch and nowhere else.
+# How often the account list is re-read while a switch is in flight. The live dump runs on
+# its own worker; this cadence bounds how often we ask ADB for another snapshot.
 ACCOUNTS_REFRESH = 2.5
 
 # How often the same dump is re-read while RECOVERING, which is the other state that can
@@ -71,21 +71,18 @@ ACCOUNTS_REFRESH = 2.5
 # Four times the switch cadence above, because nothing here is racing a budget. A switch
 # has to catch an asterisk inside `Timings.switch_timeout` (240s) and re-reads as often as
 # it can afford; RECOVERING's own deadline is the 120s stuck watchdog and the restart
-# ladder below it, both of which have room for a dozen reads. Against that, the dump
-# blocks this very thread for ~1s - and for up to `accounts.UiTreeReader.timeout` when the
-# window will not go idle, which is exactly what a rendering game does - and RECOVERING is
-# not only the wedged case: it is entered briefly after every encounter, popup or stop
-# that times out, so a switch-rate refresh would buy a stall on each of those to answer a
-# question that is almost always "no panel". The stall is bounded twice over: by that
-# reader timeout, and by `_refresh_accounts` stamping this throttle from when the read
-# FINISHED, so a slow read is always followed by a full interval of live frames.
+# ladder below it, both of which have room for a dozen reads. RECOVERING is entered briefly
+# after ordinary timeouts too, so its slower cadence avoids unnecessary ADB work when the
+# answer is almost always "no panel". The dump runs off-thread and is bounded by
+# `accounts.UiTreeReader.timeout`; only a completed result from the current screen epoch is
+# passed to the state machine.
 #
 # 10s is also the age the view fed to `_panel_close` can reach, and that bound is the
 # reason it is not longer: the observed livelock cycles RECOVERING -> SCANNING about every
 # 7s (47 RECOVERING frames at ~8fps plus a single SCANNING one), so a panel that closes is
 # described as still open for at most one or two more visits before the next read corrects
-# it. The stall only ever lands on a bot that is already not playing: a second lost in
-# RECOVERING delays the return to the map by a second, and nothing else.
+# it. The slower cadence also limits worker creation and device load in a state the run
+# enters on ordinary timeouts, not only when the panel is wedged.
 RECOVER_ACCOUNTS_REFRESH = 10.0
 
 #: How often RECOVERING may ask which app is on screen. `dumpsys window` blocks the loop
@@ -135,7 +132,7 @@ class Runner:
                  pause_file: Optional[Path] = None, tree_reader=None,
                  roster: tuple[str, ...] = (),
                  account_profiles: Optional[dict] = None,
-                 notifier=None):
+                 notifier=None, device_service=None):
         self.cfg = cfg
         #: Optional Discord notifications. A null object by default so no call
         #: site below needs a guard (see notify.NullNotifier).
@@ -152,7 +149,7 @@ class Runner:
         #: None, because None is a real account state ("we never learned who we are") and
         #: must still get the defaults applied once.
         self._profile_account: object = _UNSET
-        self._foreground_checked_at = -1e9
+        self.device_service = device_service or device.NullDeviceService()
         self.source = source
         self.actuator = actuator
         self.perceptor = perceptor
@@ -166,6 +163,8 @@ class Runner:
         self.quota = quota
         self.pause_file = pause_file
         self.tree_reader = tree_reader
+        self._tree_query_active = False
+        self._home_navigation = None
         # The accounts that exist, enumerated once at startup with the panel open. It is
         # not refreshed because it cannot be: outside a switch the panel is shut and the
         # tree lists no rows at all, so a live read would only ever shrink this to nothing.
@@ -199,6 +198,7 @@ class Runner:
         self._enc_ring: deque = deque(maxlen=max(8, int(cfg.infer_fps * ENCOUNTER_RING_SECONDS)))
         self.ctx = fsm.Context(cfg=cfg, state=BotState.BOOT,
                                state_since=time.perf_counter(), now=time.perf_counter())
+        self.ctx.last_scan_progress_ts = self.ctx.now
         self.ctx.last_map_ts = time.perf_counter()
         # A standing fact about the run, so a pure handler can tell "no view this tick"
         # from "there will never be a view" - see `fsm.Context.tree_available` and
@@ -516,6 +516,8 @@ class Runner:
             self._paused = True
             self._paused_at = real
             self._abandon_intent("paused before the screen answered")
+            if self._home_navigation is not None:
+                self._home_navigation.invalidate_pending_read()
             log.warning("PAUSED - no taps will be sent. %s",
                         "delete the pause file to resume" if self.pause_file
                         else "send SIGUSR1 again to resume")
@@ -604,34 +606,23 @@ class Runner:
                     cfg.restock_max_seconds)
 
     def _refresh_foreground(self, real: float, on_map: bool) -> None:
-        """Ask whether the GAME is the app on screen. Only while recovering.
-
-        `dumpsys window` costs ~0.1-0.3s and blocks this thread, which is cheap beside a
-        uiautomator dump but far too dear per frame, so it is asked only in the state that
-        has run out of other explanations and only every `FOREGROUND_CHECK` seconds.
-        Everywhere else the answer stays whatever it was, and UNKNOWN until first asked -
-        which the ladder treats as "say nothing", not as "no".
-
-        Paced on the REAL clock like every other pacing decision in the loop.
-        """
-        # Any state, not just RECOVERING: measured twice, the bot sat in ROCKET on a
-        # browser for its whole 150s timeout and never reached RECOVERING at all, so a
-        # check scoped to that state answered a question nobody was asking. The gate is
-        # instead "the map is not visible" - true of every wedge worth this call, false on
-        # the overwhelming majority of frames, so a healthy run never pays for it.
+        """Read the injected nonblocking foreground service, or confirm a visible map."""
         if on_map:
+            self.device_service.invalidate()
+            self.ctx.app_foreground = Tristate.TRUE
             return
-        if real - self._foreground_checked_at < FOREGROUND_CHECK:
-            return
-        self._foreground_checked_at = real
         try:
-            # The Actuator is the one thing that knows which device this run drives; read
-            # it defensively because the test doubles are not Actuators.
-            serial = getattr(self.actuator, "serial", None)
-            up = device.app_foreground(self.cfg.app_package, serial=serial)
+            state = self.device_service.read(self.cfg.app_package)
+            # Preserve a known foreign-app block across UNKNOWN, but discard stale TRUE:
+            # an inconclusive refresh cannot authorize input based on an old foreground
+            # observation.
+            if state is Tristate.UNKNOWN:
+                if self.ctx.app_foreground is not Tristate.FALSE:
+                    self.ctx.app_foreground = Tristate.UNKNOWN
+            else:
+                self.ctx.app_foreground = state
         except Exception:
-            return
-        self.ctx.app_foreground = Tristate.TRUE if up else Tristate.FALSE
+            log.exception("foreground device query failed")
 
     def _go_home(self) -> None:
         """Put the new account back on the spot the run was started from.
@@ -656,11 +647,31 @@ class Runner:
         home = (settings.get("home_favorite") or self._base_cfg.home_favorite or "").strip()
         if not home:
             return
+        if not (hasattr(self.tree_reader, "request")
+                and hasattr(self.tree_reader, "poll")
+                ) and self.ctx.app_foreground is not Tristate.TRUE:
+            self.notifier.problem(
+                "Could not return home",
+                "Foreground ownership is unknown or foreign; home-navigation input "
+                f"was blocked after switching to {self.stats.account or 'an unnamed account'}."
+            )
+            return
         try:
+            if hasattr(self.tree_reader, "request") and hasattr(self.tree_reader, "poll"):
+                # The live CLI uses AsyncUiTreeReader. Drive its reads over later runner
+                # ticks so a home lookup can never stall perception or input handling.
+                from .accounts import AsyncHomeNavigator
+                self._home_navigation = AsyncHomeNavigator(
+                    self.tree_reader, self.actuator, home)
+                return
             from .accounts import teleport_home
             went = teleport_home(self.tree_reader, self.actuator, home)
-        except Exception:
+        except Exception as exc:
             log.exception("could not return to %r", home)
+            self.notifier.problem(
+                "Could not return home",
+                f"Home-favorite navigation raised {type(exc).__name__}: {exc} "
+                f"after switching to {self.stats.account or 'an unnamed account'}.")
             return
         if went:
             log.info("back at %s", went)
@@ -669,6 +680,44 @@ class Runner:
                                   f"No PGSharp saved location matching {home!r} was "
                                   f"tapped after switching to "
                                   f"{self.stats.account or 'an unnamed account'}.")
+
+    def _poll_home_navigation(self) -> None:
+        """Advance asynchronous account-switch home navigation without waiting."""
+        navigation = self._home_navigation
+        if navigation is None:
+            return
+        if navigation.cancelled:
+            self._home_navigation = None
+            return
+        try:
+            allow_input = self.ctx.app_foreground is Tristate.TRUE
+            if not allow_input and navigation.phase != "initial":
+                # A tap already changed the screen epoch. If foreground ownership then
+                # becomes unknown or foreign, invalidate that observation and fail closed
+                # instead of guessing at the next screen.
+                navigation.tree_reader.invalidate()
+                navigation.failure = "Foreground ownership became unknown or foreign " \
+                    "during home navigation"
+                navigation.finished = True
+                completed = False
+            else:
+                completed = navigation.advance(allow_input=allow_input)
+        except Exception as exc:
+            log.exception("could not return home asynchronously")
+            navigation.failure = str(exc) or type(exc).__name__
+            navigation.finished = True
+            completed = False
+        if completed is None:
+            return
+        self._home_navigation = None
+        if completed:
+            log.info("back at %s", navigation.result)
+            return
+        detail = navigation.failure or "The home-favorite navigation did not complete."
+        self.notifier.problem(
+            "Could not return home",
+            f"{detail} after switching to "
+            f"{self.stats.account or 'an unnamed account'}.")
 
     def _maybe_heartbeat(self, now: float) -> None:
         """Post routine progress to Discord on a timer.
@@ -829,67 +878,76 @@ class Runner:
     # ---------------------------------------------------------------- accounts
 
     def _refresh_accounts(self, real: float) -> None:
-        """Re-read the UI tree, in the three states that can be looking at PGSharp's own
-        windows.
+        """Poll account and overlay state only while those PGSharp views are relevant.
 
-        SWITCHING is the state that OPENS the panel, and reads at ACCOUNTS_REFRESH because
-        it is chasing an asterisk inside a bounded budget. PREFLIGHT drives the tail of
-        that same ladder at startup (see fsm.Preflight) and shares the cadence for the same
-        reason: its AutoWalk steps locate the star, the shortcut menu and a dialog button
-        in the live tree, and `config.AutoWalk.budget_s` gives the whole ladder 30s - at
-        RECOVER_ACCOUNTS_REFRESH (10s) it would spend that budget waiting for its second
-        usable view. RECOVERING is the state that finds a panel already open and cannot see
-        it any other way: measured at the bot's own resolution the accounts panel reports
-        screen=Menu@0.95, in_overlay=False, x_button=False and no close button, so the tree
-        is the only channel that knows it is there (see fsm.Recovering._panel_close). It
-        gets its own, longer throttle - RECOVER_ACCOUNTS_REFRESH - because the read blocks
-        this thread and RECOVERING is entered briefly after every ordinary timeout, not
-        only when the bot is wedged; see that constant for the whole trade.
+        SWITCHING reads quickly enough to verify the active account inside its bounded
+        budget. PREFLIGHT shares that cadence because its AutoWalk ladder has a shorter
+        deadline. RECOVERING uses a slower cadence because it is also entered after
+        ordinary timeouts and its panel-close rung has more time. The live CLI wraps the
+        ADB reader in AsyncUiTreeReader, so queries never block perception or input. A
+        completed result is used once, and any gesture or state transition invalidates it
+        before another overlay decision can use it.
 
-        What a read costs, since PREFLIGHT now buys them at startup: `UiTreeReader.read`
-        blocks THIS thread - the run loop's own - for ~3.0s against the rendering game
-        (measured: 2.96, 3.00, 3.00, 3.00, 4.46), bounded by `UiTreeReader.timeout` (5s),
-        and the throttle below is stamped from when the read FINISHED, so usable views
-        arrive ~5.5s apart. A preflight is therefore a handful of blocked seconds inside
-        `Timings.preflight_timeout` (90s), once per run, before the bot starts playing -
-        against a run that otherwise plays for hours zoomed in with Virtual Go Plus off.
-        Nothing is perceived, no key is read and no signal is serviced while a read blocks,
-        which is why this is throttled at all and why RECOVERING's throttle is four times
-        longer.
-
-        Everywhere else this still returns without reading: outside these states the panel
-        is shut, so a blocking dump could only ever report `rows=()`.
-
-        Paced on the REAL clock, like every other pacing decision in the loop: a paused run
-        freezes `ctx.now`, and a frozen clock never reaches its own next deadline.
+        The UI tree is not queried outside SWITCHING, PREFLIGHT, and RECOVERING because the
+        relevant overlays are closed there. Pacing uses the real clock so pausing the FSM
+        does not freeze device-query scheduling.
         """
         switching = self.ctx.state is BotState.SWITCHING
         # The two states that drive PGSharp's overlay themselves, and so need the fast
         # cadence and the AutoWalk icon reading below. `switching` stays separate from it
         # because a preflight has no switch attempt to keep books for - see below.
         driving = switching or self.ctx.state is BotState.PREFLIGHT
-        if self.tree_reader is None \
-                or not (driving or self.ctx.state is BotState.RECOVERING):
+        active = driving or self.ctx.state is BotState.RECOVERING
+        if self.tree_reader is None:
             return
-        if real - self._accounts_read_at < (ACCOUNTS_REFRESH if driving
-                                            else RECOVER_ACCOUNTS_REFRESH):
+        if not active:
+            if self._tree_query_active and hasattr(self.tree_reader, "poll"):
+                self.tree_reader.invalidate()
+                self.ctx.accounts = None
+            self._tree_query_active = False
             return
-        t0 = time.perf_counter()
-        try:
-            self.ctx.accounts = self.tree_reader.read()
-        except Exception:
-            log.exception("account tree read failed")
-            return
-        finally:
-            # Stamped from when the read FINISHED, not when it started. The dump blocks
-            # this thread, so a start-to-start throttle is no throttle at all once a read
-            # runs long: a read that costs more than the interval makes the next one
-            # eligible the instant it returns, and the loop never gets a frame back
-            # between them. End-to-start guarantees a whole interval of seeing the screen
-            # after every interval of not seeing it. Expressed as an offset from `real` -
-            # the loop's single clock sample, passed in - rather than a fresh
-            # perf_counter, so this method still takes its clock as an argument.
-            self._accounts_read_at = real + (time.perf_counter() - t0)
+
+        interval = ACCOUNTS_REFRESH if driving else RECOVER_ACCOUNTS_REFRESH
+        if hasattr(self.tree_reader, "poll") and hasattr(self.tree_reader, "request"):
+            # Live CLI readers use AsyncUiTreeReader. State entry invalidates any result
+            # from a previous screen, and every accepted gesture invalidates in apply().
+            # Thus a completed view is both nonblocking and from the current UI epoch.
+            if not self._tree_query_active:
+                self.tree_reader.invalidate()
+                self.ctx.accounts = None
+                self._accounts_read_at = 0.0
+            self._tree_query_active = True
+            try:
+                fresh = self.tree_reader.poll()
+                if fresh is not None:
+                    self.ctx.accounts = fresh
+                    # Stamp on result consumption, slightly after worker completion. This
+                    # keeps the recovery snapshot age bounded by the configured interval,
+                    # even when a dump itself approaches its timeout.
+                    self._accounts_read_at = real
+                if real - self._accounts_read_at >= interval:
+                    # If the previous read is still in flight, request() returns False;
+                    # the next tick can start another one as soon as it completes.
+                    self.tree_reader.request()
+            except Exception:
+                log.exception("could not poll account tree reader")
+                return
+            if fresh is None:
+                return
+        else:
+            # Test doubles and alternate readers may remain synchronous. The production
+            # CLI wraps UiTreeReader in AsyncUiTreeReader before handing it to Runner.
+            if real - self._accounts_read_at < interval:
+                return
+            t0 = time.perf_counter()
+            try:
+                self.ctx.accounts = self.tree_reader.read()
+            except Exception:
+                log.exception("account tree read failed")
+                return
+            finally:
+                self._accounts_read_at = real + (time.perf_counter() - t0)
+            fresh = self.ctx.accounts
         if not driving:
             # The rest belongs to a run that is driving the overlay itself. `_last_seen_active`
             # is the record of who the tree named during a switch ATTEMPT and is spent by
@@ -897,15 +955,14 @@ class Runner:
             # only `Switching`/`Preflight` ever open. Writing either from RECOVERING would be
             # answering a question nobody asked with a reading taken off the wrong screen.
             return
-        if switching and self.ctx.accounts.available \
-                and self.ctx.accounts.active is not None:
+        if switching and fresh.available and fresh.active is not None:
             # The asterisk is ground truth about who is logged in, and `verify` re-reads it
             # every couple of seconds right up to the timeout - on the live failure it
             # named the outgoing account fourteen times, the last of them minutes after the
             # login tap. That is evidence, and `_on_switch_failed` is where it gets spent.
             # Recorded here rather than read off `ctx.accounts` later because the handler
             # drops that view after every tap it takes.
-            self._last_seen_active = self.ctx.accounts.active.name
+            self._last_seen_active = fresh.active.name
         # Refresh the AutoWalk icon colour reading in lockstep with the view that just
         # supplied its bounds - see perception.autowalk_active_signal,
         # fsm.Switching._autowalk_menu, and fsm.Context.switch_autowalk_active for why
@@ -913,8 +970,7 @@ class Runner:
         # the SAME frame `perceptor.observe` already ran on this tick (set at the top of
         # the read loop, before this method is ever called): the uiautomator dump just
         # read above supplies the icon's bounds, the frame supplies its colour.
-        icon_rect = (self.ctx.accounts.autowalk_icon_rect_norm
-                    if self.ctx.accounts.available else None)
+        icon_rect = fresh.autowalk_icon_rect_norm if fresh.available else None
         self.ctx.switch_autowalk_active = (
             perception.autowalk_active_signal(self._last_frame.bgr, icon_rect, self.cfg)
             if self._last_frame is not None else Tristate.UNKNOWN)
@@ -1230,8 +1286,20 @@ class Runner:
 
     def apply(self, effects: list[Effect], obs: Observation) -> None:
         """One place applies everything, so dry-run and tracing cannot be forgotten."""
+        # A current map observation is positive evidence that the game owns the screen.
+        # Off-map input requires a fresh positive device foreground result.
+        if obs is not None and obs.on_map:
+            self.ctx.app_foreground = Tristate.TRUE
+        rotation_accepted = False
         for e in effects:
             if isinstance(e, Transition):
+                if hasattr(self.tree_reader, "poll"):
+                    # A state transition changes what a useful tree means. Drop any
+                    # in-flight or completed read, then request a fresh view in the new
+                    # state before allowing another overlay action.
+                    self.tree_reader.invalidate()
+                    self.ctx.accounts = None
+                    self._accounts_read_at = 0.0
                 self._count_transition(e)
                 self.enter_state(e.to, e.outcome, e.reason)
             elif isinstance(e, SetIntent):
@@ -1247,8 +1315,12 @@ class Runner:
             elif isinstance(e, Cooldown):
                 self.ctx.cooldowns.append((e.x, e.y, self.ctx.now + e.seconds))
             elif isinstance(e, ClearSpatialMemory):
-                self.ctx.cooldowns.clear()
-                log.info("cleared spatial memory: %s", e.reason)
+                if rotation_accepted:
+                    self.ctx.cooldowns.clear()
+                    log.info("cleared spatial memory: %s", e.reason)
+                    rotation_accepted = False
+                else:
+                    log.info("kept spatial memory because the camera rotation was not accepted")
             elif isinstance(e, Note):
                 log.log(logging.WARNING if e.level == "warn" else logging.INFO, e.text)
             elif isinstance(e, Halt):
@@ -1256,8 +1328,16 @@ class Runner:
                 self._stop = True
                 self.enter_state(BotState.HALTED, IntentOutcome.CARRIED, e.reason)
             elif is_actuation(e):
+                if isinstance(e, (Tap, Swipe, Back, DoubleTapDrag, Pinch)) \
+                        and self.ctx.app_foreground is not Tristate.TRUE:
+                    log.warning("blocked screen input while foreground is %s: %s",
+                                self.ctx.app_foreground.value, e.reason)
+                    continue
                 if self.actuator.apply(e, now=self.ctx.now):
+                    rotation_accepted = isinstance(e, Swipe) and e.budget == "rotate"
                     budget = getattr(e, "budget", "tap")
+                    if budget in ("tap", "rotate"):
+                        self.ctx.last_scan_progress_ts = self.ctx.now
                     if budget == "throw":
                         self.stats.on_ball_thrown()
                         self.ctx.throws_this_encounter += 1
@@ -1268,14 +1348,12 @@ class Runner:
                         # switch_zoom_reps and app_restarts follow: a refused command must
                         # not spend the bound that decides when to escalate to a restart.
                         self.ctx.foregrounds += 1
-                        # Stays FALSE, not UNKNOWN. Setting it to UNKNOWN here lifted the
-                        # refusal in `fsm.step` for the whole gap until the next check, and
-                        # the bot spent that gap tapping - straight back onto the sponsored
-                        # link it had just been rescued from. Measured: `am start` worked
-                        # every single time and the run still ended in Chrome. Only a check
-                        # that SEES the game may say it is back, and the stamp below makes
-                        # that check happen on the very next tick.
-                        self._foreground_checked_at = -1e9
+                        # Keep a known foreign-app block; otherwise discard the old answer
+                        # until a fresh query confirms the foreground. An accepted launch
+                        # is not evidence that Android focused the game.
+                        if self.ctx.app_foreground is not Tristate.FALSE:
+                            self.ctx.app_foreground = Tristate.UNKNOWN
+                        self.device_service.invalidate()
                     elif budget == "zoom" and isinstance(e, Pinch):
                         # Counted here, not by a self-reported SetFlag from _zoom: the
                         # handler is pure and cannot know whether the actuator actually
@@ -1355,6 +1433,10 @@ class Runner:
                     self.ctx.taps_in_state += 1
                     if isinstance(e, (Tap, Swipe, Back, Pinch, RestartApp)):
                         self.ctx.settle_until = self.ctx.now + self.cfg.timings.ui_settle
+                    if (self.ctx.state in (BotState.SWITCHING, BotState.PREFLIGHT,
+                                           BotState.RECOVERING)
+                            and hasattr(self.tree_reader, "invalidate")):
+                        self.tree_reader.invalidate()
                     if self.ctx.state in (BotState.SWITCHING, BotState.PREFLIGHT):
                         # The launcher tap TOGGLES the overlay, so a second decision taken
                         # from the same view closes the panel the first one opened and the
@@ -1367,6 +1449,9 @@ class Runner:
                         # `fsm.Switching._autowalk_close`), so a preflight deciding twice
                         # from one view would close the menu it had just opened and then
                         # find no "AutoWalk" node to pick.
+                        self.ctx.accounts = None
+                    elif (self.ctx.state is BotState.RECOVERING
+                          and hasattr(self.tree_reader, "poll")):
                         self.ctx.accounts = None
 
     # ---------------------------------------------------------------- trace
@@ -1535,6 +1620,8 @@ class Runner:
                     self._party_false = 0
                 self.ctx.party_cannot_battle = self._party_false >= 2
 
+                if self.ctx.state is not BotState.SCANNING or not obs.on_map:
+                    self.ctx.last_scan_progress_ts = now
                 if obs.on_map:
                     self.ctx.last_map_ts = now
                     # A confirmed map is the only evidence that a restart worked, so it is
@@ -1599,6 +1686,7 @@ class Runner:
                 self._apply_account_profile()
                 self._refresh_foreground(real, obs.on_map)
                 self._refresh_accounts(real)
+                self._poll_home_navigation()
                 self._maybe_preflight(obs)
                 self._maybe_switch(obs)
                 self._update_restock()
@@ -1708,9 +1796,17 @@ class Runner:
         # it. `actuator.stats()` in the log line below is a live call into a component we
         # have just closed, which is exactly the kind of thing that used to.
         try:
+            if self._home_navigation is not None:
+                try:
+                    self._home_navigation.cancel()
+                    self._home_navigation = None
+                except Exception:
+                    log.exception("could not cancel pending home navigation")
             for closer in (getattr(self.source, "release", None),
                            getattr(self.actuator, "close", None),
                            getattr(self.keyboard, "stop", None),
+                           getattr(self.device_service, "close", None),
+                           getattr(self.tree_reader, "close", None),
                            getattr(self.ledger, "close", None)):
                 if closer:
                     try:

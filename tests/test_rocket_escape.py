@@ -30,7 +30,7 @@ import pytest
 from pogobot import fsm
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, Back, Halt, RestartApp, Tap, Transition
-from pogobot.observation import ScreenGuess
+from pogobot.observation import ScreenGuess, Tristate
 from tests.factories import obs
 
 #: The run this fix is about: Team GO Rocket turned off for the current account.
@@ -38,7 +38,8 @@ OFF = DEFAULT.scaled(fight_rockets=False)
 
 
 def ctx(cfg=OFF, state=BotState.SCANNING, now=100.0, **kw):
-    c = fsm.Context(cfg=cfg, state=state, state_since=0.0, now=now)
+    c = fsm.Context(cfg=cfg, state=state, state_since=0.0, now=now,
+                    app_foreground=Tristate.TRUE)
     for k, v in kw.items():
         setattr(c, k, v)
     return c

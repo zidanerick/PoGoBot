@@ -18,7 +18,8 @@ import pytest
 
 from pogobot import fsm
 from pogobot.config import DEFAULT
-from pogobot.effects import BotState, Back, ForegroundApp, RestartApp, Tap
+from pogobot.effects import (BotState, Back, ForegroundApp, Pinch, RestartApp,
+                             Swipe, Tap)
 from pogobot.observation import Tristate
 from tests.factories import obs
 
@@ -66,13 +67,20 @@ def test_it_names_the_configured_app():
     assert fg.activity == DEFAULT.app_activity
 
 
-def test_unknown_is_not_the_same_as_no():
-    """Until the runner has actually looked, this rung must say nothing and the ladder must
-    behave exactly as it did before - otherwise every recovery on a healthy run would open
-    with an `am start`."""
-    out = fsm.step(OFF, ctx(app_foreground=Tristate.UNKNOWN))
+def test_unknown_foreground_fails_closed_for_every_screen_gesture():
+    c = ctx(app_foreground=Tristate.UNKNOWN)
+    out = fsm.step(OFF, c)
     assert not [e for e in out if isinstance(e, ForegroundApp)]
-    assert [e for e in out if isinstance(e, Back)], "the ordinary ladder should have run"
+    assert not [e for e in out if isinstance(e, (Back, Tap, Swipe, Pinch))]
+
+
+def test_unknown_foreground_still_reaches_non_screen_recovery_escalation():
+    c = fsm.Context(cfg=DEFAULT, state=BotState.RECOVERING, state_since=0.0,
+                    now=DEFAULT.timings.stuck_watchdog + 50.0,
+                    app_foreground=Tristate.UNKNOWN, last_map_ts=0.0)
+    out = fsm.step(OFF, c)
+    assert any(isinstance(e, RestartApp) for e in out)
+    assert not [e for e in out if isinstance(e, (Back, Tap, Swipe, Pinch))]
 
 
 def test_a_game_already_in_front_is_left_alone():
@@ -107,16 +115,20 @@ def test_the_handler_writes_nothing_to_the_context():
 
 
 def test_the_runner_asks_whenever_the_map_is_missing():
-    """Scoping this to RECOVERING was wrong and cost a live run: the bot sat in ROCKET on a
-    browser for the whole 150s ROCKET timeout and never reached RECOVERING, so the check
-    never ran. The gate is "no map", which is true of every wedge worth a `dumpsys` and
-    false on the overwhelming majority of frames."""
-    import inspect
+    """Every off-map state asks the injected service without doing device I/O itself."""
     from pogobot import runner as R
-    src = inspect.getsource(R.Runner._refresh_foreground)
-    assert "if on_map:" in src, "the gate should be the map, not a state"
-    assert "BotState.RECOVERING" not in src
-    assert "FOREGROUND_CHECK" in src
+    class Service:
+        def __init__(self): self.packages = []
+        def read(self, package): self.packages.append(package); return Tristate.FALSE
+        def invalidate(self): pass
+        def close(self): pass
+    service = Service()
+    r = R.Runner(DEFAULT, object(), object(), None, display=False, device_service=service)
+    for state in (BotState.ROCKET, BotState.RECOVERING, BotState.ENCOUNTER):
+        r.ctx.state = state
+        r._refresh_foreground(10.0, False)
+    assert service.packages == [DEFAULT.app_package] * 3
+    assert r.ctx.app_foreground is Tristate.FALSE
 
 
 def test_the_run_loop_actually_asks():
@@ -128,6 +140,7 @@ def test_the_run_loop_actually_asks():
     from pogobot import runner as R
     src = inspect.getsource(R.Runner.run)
     assert "self._refresh_foreground(real, obs.on_map)" in src
+    assert "device.app_foreground" not in src
 
 
 def test_an_accepted_raise_is_counted_by_the_runner():
@@ -136,12 +149,13 @@ def test_an_accepted_raise_is_counted_by_the_runner():
     from tests.test_switch_runner import make_runner
     r = make_runner()
     r.ctx.state = BotState.RECOVERING
+    r.ctx.app_foreground = Tristate.FALSE
     before = r.ctx.foregrounds
     r.apply([ForegroundApp(DEFAULT.app_package, DEFAULT.app_activity, "recover: raise")],
             OFF)
     assert r.ctx.foregrounds == before + 1
-    assert r.ctx.app_foreground is Tristate.UNKNOWN, \
-        "the old answer must not survive the command that invalidates it"
+    assert r.ctx.app_foreground is Tristate.FALSE, \
+        "the foreign-app input barrier must survive an accepted raise"
 
 
 @pytest.mark.parametrize("state", [BotState.ROCKET, BotState.ENCOUNTER,
@@ -170,6 +184,25 @@ def test_the_refusal_lifts_the_moment_the_game_is_back():
             foregrounds=DEFAULT.max_foreground_attempts)
     c.state = BotState.RECOVERING
     assert fsm.step(OFF, c), "the ladder should run again once the game is in front"
+
+
+def test_stale_true_foreground_is_discarded_when_the_poll_returns_unknown():
+    from pogobot import runner as R
+
+    class Service:
+        def __init__(self): self.states = iter((Tristate.TRUE, Tristate.UNKNOWN))
+        def read(self, package): return next(self.states)
+        def invalidate(self): pass
+        def close(self): pass
+
+    r = R.Runner(DEFAULT, object(), object(), None, display=False,
+                 device_service=Service())
+    r._refresh_foreground(100.0, False)
+    assert r.ctx.app_foreground is Tristate.TRUE
+    r._refresh_foreground(101.0, False)
+    assert r.ctx.app_foreground is Tristate.UNKNOWN
+    out = fsm.step(OFF, r.ctx)
+    assert not [e for e in out if isinstance(e, (Back, Tap, Swipe, Pinch))]
 
 
 def test_recovering_itself_just_waits():

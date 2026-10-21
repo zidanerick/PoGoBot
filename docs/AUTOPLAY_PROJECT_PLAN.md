@@ -179,3 +179,9 @@ Review the proposed milestone independently against docs/AUTOPLAY_PROJECT_PLAN.m
 ## First practical milestone
 
 Start agents 1 and 2 with the prompts above. Their first reviewable result should be a green hermetic unit baseline plus the two confirmed recovery/rotation fixes. This is more valuable than adding random movement to the current fixed-swipe loop. The rest of the roles are staged assignments, not a recommendation to pay for six continuously running agents.
+
+## Runtime reliability progress
+
+On 18 October 2026, branch `fix/runtime-reliability` completed F1 and F2 with public-dispatcher and runner-loop regressions. F1 still refuses gestures while another app is foregrounded but now lets RECOVERING reach its restart/halt timeout. F2 tracks scan progress separately from `last_map_ts`, so repeated visible-map frames no longer reset the idle-rotation timer. Foreground `dumpsys window` checks use an injectable nonblocking service; replay and an unconfigured runner use a no-device service, and failed/ambiguous reads remain UNKNOWN. Runtime UI-tree account queries now also run on a coalescing worker. Results are consumed once and invalidated after gestures or state changes, so a slow dump cannot stall the run loop or authorize an action from a stale screen. Startup account identification remains synchronous before the runner starts.
+
+Validation on this checkout after the follow-up: `python -m pytest tests --ignore=tests/test_sponsored_ad.py -q` passed **990 tests, 39 skipped**. The sponsored-ad model tests were excluded because `ultralytics`/Torch are not installed in this environment. This does not change the audit's historical test record above.

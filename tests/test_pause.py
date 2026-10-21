@@ -10,6 +10,7 @@ import pytest
 from pogobot import runner as runner_mod
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState
+from pogobot.observation import Tristate
 from pogobot.stats import SessionStats
 
 
@@ -43,7 +44,9 @@ class _Src:
 
 
 def _runner(**kw):
-    return runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False, **kw)
+    runner = runner_mod.Runner(DEFAULT, _Src(), _Act(), perceptor=None, display=False, **kw)
+    runner.ctx.app_foreground = Tristate.TRUE
+    return runner
 
 
 # ------------------------------------------------------------------ triggers
@@ -209,6 +212,11 @@ class _Ledger:
 def _loop_runner(perceptor=None, **kw):
     cfg = DEFAULT.scaled(infer_fps=40.0)
     act = _Act()
+    class _Foreground:
+        def read(self, package): return Tristate.TRUE
+        def invalidate(self): pass
+        def close(self): pass
+    kw.setdefault("device_service", _Foreground())
     r = runner_mod.Runner(cfg, _LoopSrc(), act,
                           perceptor or _Perceptor(on_map=True, detections=(det(),)),
                           display=False, **kw)

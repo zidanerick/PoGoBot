@@ -43,7 +43,7 @@ from pogobot import fsm
 from pogobot import perception as P
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, Back, Tap
-from pogobot.observation import ScreenGuess
+from pogobot.observation import ScreenGuess, Tristate
 from tests.factories import obs
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -71,7 +71,8 @@ LIVE_MEDIAN_CONF = 0.78
 
 
 def ctx(cfg=DEFAULT, state=BotState.ROCKET, now=100.0, **kw):
-    c = fsm.Context(cfg=cfg, state=state, state_since=now - 0.5, now=now)
+    c = fsm.Context(cfg=cfg, state=state, state_since=now - 0.5, now=now,
+                    app_foreground=Tristate.TRUE)
     for k, v in kw.items():
         setattr(c, k, v)
     return c
@@ -335,7 +336,7 @@ def _drive(o, cfg, secs=200.0):
     """The real tick loop, mirroring `Runner.apply`'s pacing bookkeeping: every applied
     effect stamps its budget, and the effects that move the UI open a settle window."""
     c = fsm.Context(cfg=cfg, state=BotState.ROCKET, state_since=0.0, now=0.0,
-                    last_rocket_ts=0.0)
+                    last_rocket_ts=0.0, app_foreground=Tristate.TRUE)
     dt, n_taps, n_backs = 1.0 / cfg.infer_fps, 0, 0
     for i in range(int(secs / dt)):
         c.now = i * dt

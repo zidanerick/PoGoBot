@@ -8,11 +8,13 @@ import pytest
 from pogobot import fsm
 from pogobot.config import DEFAULT
 from pogobot.effects import BotState, IntentOutcome, Tap, Transition, Halt, Swipe
+from pogobot.observation import Tristate
 from tests.factories import obs, det
 
 
 def ctx(state=BotState.SCANNING, now=0.0, **kw):
-    c = fsm.Context(cfg=DEFAULT, state=state, state_since=0.0, now=now)
+    c = fsm.Context(cfg=DEFAULT, state=state, state_since=0.0, now=now,
+                    app_foreground=Tristate.TRUE)
     for k, v in kw.items():
         setattr(c, k, v)
     return c

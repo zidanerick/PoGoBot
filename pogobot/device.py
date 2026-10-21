@@ -53,17 +53,114 @@ def app_running(package: str, adb: str = "adb", serial: Optional[str] = None) ->
         return False
 
 
-def app_foreground(package: str, adb: str = "adb", serial: Optional[str] = None) -> bool:
+def foreground_state(package: str, adb: str = "adb", serial: Optional[str] = None) -> Tristate:
+    """Return a positive game/foreign/unknown answer from Android's focused window."""
     cmd = ([adb] + (["-s", serial] if serial else [])
            + ["shell", "dumpsys", "window"])
     try:
-        out = subprocess.run(cmd, capture_output=True, timeout=8).stdout.decode(errors="replace")
+        result = subprocess.run(cmd, capture_output=True, timeout=8)
+        if result.returncode != 0:
+            return Tristate.UNKNOWN
+        out = result.stdout.decode(errors="replace")
     except Exception:
-        return False
+        return Tristate.UNKNOWN
     for line in out.splitlines():
-        if "mCurrentFocus" in line:
-            return package in line
-    return False
+        if "mCurrentFocus" not in line:
+            continue
+        match = re.search(r"Window\{[^ ]+ u\d+ ([^/\s]+)/", line)
+        if match:
+            return Tristate.TRUE if match.group(1) == package else Tristate.FALSE
+        return Tristate.UNKNOWN
+    return Tristate.UNKNOWN
+
+
+def app_foreground(package: str, adb: str = "adb", serial: Optional[str] = None) -> bool:
+    """Compatibility wrapper for startup paths that need a boolean answer."""
+    return foreground_state(package, adb, serial) is Tristate.TRUE
+
+
+class ForegroundPoller:
+    """Nonblocking, injectable foreground query service for the runtime loop.
+
+    One daemon worker performs each ADB query. Calls to ``read`` never wait for it;
+    failed or ambiguous dumps remain UNKNOWN. ``invalidate`` discards an in-flight answer
+    after the observed screen or an accepted foreground action makes it stale.
+    """
+
+    def __init__(self, adb: str = "adb", serial: Optional[str] = None,
+                 interval: float = 5.0, query=None, clock=None):
+        self.adb, self.serial = adb, serial
+        self.interval = max(0.0, float(interval))
+        self._query = query or foreground_state
+        self._clock = clock or time.monotonic
+        self._lock = threading.Lock()
+        self._state = Tristate.UNKNOWN
+        self._next_at = 0.0
+        self._generation = 0
+        self._package: Optional[str] = None
+        self._running = False
+        self._closed = False
+
+    def read(self, package: str) -> Tristate:
+        with self._lock:
+            if self._closed:
+                return Tristate.UNKNOWN
+            if self._package is not None and package != self._package:
+                self._generation += 1
+                self._state = Tristate.UNKNOWN
+                self._next_at = 0.0
+            self._package = package
+            now = self._clock()
+            if now >= self._next_at:
+                # Once the polling interval expires, the previous answer is stale. Do
+                # not keep authorizing screen input while a replacement query runs.
+                self._state = Tristate.UNKNOWN
+            if not self._running and now >= self._next_at:
+                self._start_locked()
+            return self._state
+
+    def _start_locked(self) -> None:
+        self._running = True
+        generation = self._generation
+        package = self._package
+        def work():
+            try:
+                value = self._query(package, self.adb, self.serial)
+                if not isinstance(value, Tristate):
+                    value = (Tristate.TRUE if value is True else
+                             Tristate.FALSE if value is False else Tristate.UNKNOWN)
+            except Exception:
+                value = Tristate.UNKNOWN
+            with self._lock:
+                if generation == self._generation and not self._closed:
+                    self._state = value
+                    self._next_at = self._clock() + self.interval
+                self._running = False
+        threading.Thread(target=work, name="foreground-poller", daemon=True).start()
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._generation += 1
+            self._state = Tristate.UNKNOWN
+            self._next_at = 0.0
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            self._generation += 1
+            self._state = Tristate.UNKNOWN
+
+
+class NullDeviceService:
+    """Hermetic device service for replay and tests."""
+    def read(self, package: str) -> Tristate:
+        return Tristate.UNKNOWN
+
+    def invalidate(self) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
 
 
 def ensure_app_running(package: str, activity: str, adb: str = "adb",

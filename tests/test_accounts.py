@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pogobot.accounts import (AccountView, FakeTreeReader, UiTreeReader,
+from pogobot.accounts import (AccountView, AsyncUiTreeReader, FakeTreeReader, UiTreeReader,
                               identify_account, parse_dump)
 from pogobot.effects import Tap
 
@@ -216,6 +216,62 @@ def test_run_with_serial_includes_device_selector(monkeypatch):
         assert "-s" in cmd
         idx = cmd.index("-s")
         assert cmd[idx + 1] == "device123"
+
+
+def test_async_ui_tree_reader_returns_only_new_nonblocking_results():
+    from threading import Event
+    from time import monotonic, sleep
+
+    entered, release = Event(), Event()
+    expected = AccountView(available=True, panel_open=True)
+
+    class SlowReader:
+        def read(self):
+            entered.set()
+            release.wait(1)
+            return expected
+
+    reader = AsyncUiTreeReader(SlowReader())
+    started = monotonic()
+    assert reader.poll() is None
+    assert reader.request()
+    assert monotonic() - started < 0.1
+    assert entered.wait(0.5)
+    assert not reader.request(), "overlapping dumps must be coalesced"
+    release.set()
+    for _ in range(100):
+        result = reader.poll()
+        if result is not None:
+            break
+        sleep(0.005)
+    assert result is expected
+    assert reader.poll() is None, "a completed result is consumed exactly once"
+    reader.close()
+
+
+def test_async_ui_tree_reader_drops_results_invalidated_mid_query():
+    from threading import Event
+    from time import sleep
+
+    entered, release = Event(), Event()
+
+    class SlowReader:
+        def read(self):
+            entered.set()
+            release.wait(1)
+            return AccountView(available=True, panel_open=True)
+
+    reader = AsyncUiTreeReader(SlowReader())
+    assert reader.request()
+    assert entered.wait(0.5)
+    reader.invalidate()
+    release.set()
+    for _ in range(100):
+        if not reader._running:
+            break
+        sleep(0.005)
+    assert reader.poll() is None
+    reader.close()
 
 
 class _Act:
