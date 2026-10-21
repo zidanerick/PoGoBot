@@ -453,7 +453,8 @@ def main(argv=None) -> int:
         log.info("device screen %dx%d", *screen_wh)
         # Before capture, not after: see device.ensure_app_running for why a still
         # launcher produces no frames at all and takes ScrcpySource down with it.
-        ensure_app_running(cfg.app_package, cfg.app_activity, serial=a.serial, log=log)
+        ensure_app_running(cfg.app_package, cfg.app_activity, serial=a.serial, log=log,
+                           device_services=device_services, clock=clock)
         source = ScrcpySource(cfg, serial=a.serial)
         actuator = Actuator(screen_wh, dry_run=cfg.dry_run, serial=a.serial)
         keyboard = None
