@@ -1,3 +1,5 @@
+"""Offline adapter tests using local T01-shaped stand-ins, not shared runtime types."""
+
 from dataclasses import dataclass
 from enum import Enum
 import pytest
@@ -73,6 +75,52 @@ def test_signal_adapts_boolean_without_treating_optical_score_as_confidence(adap
     assert evidence.frame_ref is frame_ref
 
 
+def test_adapter_does_not_compare_run_relative_ref_time_to_legacy_frame_time(adapter):
+    frame_ref = FrameRef("run-1", 2, 7, 12.5)
+    frame, observation = _inputs(ts=9000.5, seq=7)
+
+    evidence = adapter.signal(
+        frame=frame,
+        observation=observation,
+        frame_ref=frame_ref,
+        signal_name="map_ball",
+        kind="map_ball_visible",
+        source="legacy-optical",
+    )
+
+    assert evidence.frame_ref is frame_ref
+
+
+def test_adapter_rejects_missing_frame_bound_reference_when_type_exposes_field(adapter):
+    frame_ref = FrameRef("run-1", 2, 7, 12.5)
+    frame, observation = _inputs(frame_ref=frame_ref)
+    object.__setattr__(frame, "frame_ref", None)
+
+    with pytest.raises(ValueError, match="Frame is missing"):
+        adapter.signal(frame=frame, observation=observation, frame_ref=frame_ref,
+                       signal_name="map_ball", kind="map_ball_visible", source="optical")
+
+
+def test_adapter_rejects_frame_bound_to_a_different_run_or_epoch(adapter):
+    frame_ref = FrameRef("run-1", 2, 7, 12.5)
+    frame, observation = _inputs(frame_ref=frame_ref)
+    object.__setattr__(frame, "frame_ref", FrameRef("other-run", 3, 7, 12.5))
+
+    with pytest.raises(ValueError, match="different FrameRef"):
+        adapter.signal(frame=frame, observation=observation, frame_ref=frame_ref,
+                       signal_name="map_ball", kind="map_ball_visible", source="optical")
+
+
+def test_adapter_rejects_observation_missing_bound_reference_when_type_exposes_field(adapter):
+    frame_ref = FrameRef("run-1", 2, 7, 12.5)
+    frame, observation = _inputs(frame_ref=frame_ref)
+    object.__setattr__(observation, "frame_ref", None)
+
+    with pytest.raises(ValueError, match="Observation is missing"):
+        adapter.signal(frame=frame, observation=observation, frame_ref=frame_ref,
+                       signal_name="map_ball", kind="map_ball_visible", source="optical")
+
+
 def test_detection_adapts_normalized_region_and_preserves_exact_frame_ref(adapter):
     detection = Detection("pokemon", 0.8, (25, 50, 75, 150), (0.5, 0.5, 0.5, 0.5))
     frame_ref = FrameRef("run-1", 2, 7, 12.5)
@@ -116,7 +164,6 @@ def test_tristate_preserves_unknown_instead_of_turning_it_into_false(adapter):
         (7, 12.5, 8, 12.5, 7, 12.5),
         (7, 12.5, 7, 12.6, 7, 12.5),
         (7, 12.5, 7, 12.5, 8, 12.5),
-        (7, 12.5, 7, 12.5, 7, 12.6),
     ],
 )
 def test_signal_rejects_frame_observation_or_frame_ref_identity_mismatch(
@@ -127,6 +174,15 @@ def test_signal_rejects_frame_observation_or_frame_ref_identity_mismatch(
     frame_ref = FrameRef("run-1", 2, ref_seq, ref_ts)
 
     with pytest.raises(ValueError, match="identit|identify"):
+        adapter.signal(frame=frame, observation=observation, frame_ref=frame_ref,
+                       signal_name="map_ball", kind="map_ball_visible", source="optical")
+
+
+def test_signal_rejects_nonfinite_t01_capture_timestamp(adapter):
+    frame, observation = _inputs()
+    frame_ref = FrameRef("run-1", 2, 7, float("nan"))
+
+    with pytest.raises(ValueError, match="finite"):
         adapter.signal(frame=frame, observation=observation, frame_ref=frame_ref,
                        signal_name="map_ball", kind="map_ball_visible", source="optical")
 
