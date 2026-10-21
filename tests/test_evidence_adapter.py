@@ -4,7 +4,7 @@ import pytest
 
 from pogobot.evidence_adapter import EvidenceAdapter
 from pogobot.frames import Frame
-from pogobot.observation import Detection, Observation, ScreenGuess, Signal
+from pogobot.observation import Detection, Observation, ScreenGuess, Signal, Tristate
 
 
 class T01Tristate(Enum):
@@ -89,6 +89,25 @@ def test_detection_adapts_normalized_region_and_preserves_exact_frame_ref(adapte
     assert evidence == Evidence(frame_ref, "pokemon", T01Tristate.TRUE, 0.8,
                                 "detector-v1", (0.25, 0.25, 0.75, 0.75))
     assert evidence.frame_ref is frame_ref
+
+
+def test_tristate_preserves_unknown_instead_of_turning_it_into_false(adapter):
+    frame_ref = FrameRef("run-1", 2, 7, 12.5)
+    frame, observation = _inputs(frame_ref=frame_ref)
+    object.__setattr__(observation, "goplus", Tristate.UNKNOWN)
+
+    evidence = adapter.tristate(
+        frame=frame,
+        observation=observation,
+        frame_ref=frame_ref,
+        field_name="goplus",
+        kind="goplus_enabled",
+        source="legacy-screen-state",
+    )
+
+    assert evidence.value is T01Tristate.UNKNOWN
+    assert evidence.frame_ref is frame_ref
+    assert evidence.confidence is None
 
 
 @pytest.mark.parametrize(
