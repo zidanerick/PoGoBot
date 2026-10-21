@@ -1,8 +1,8 @@
-"""Shared runtime contracts for clocks, device snapshots, and capture identity.
+"""T01 candidate contracts for clocks, device snapshots, and capture identity.
 
-This module is the first T01 integration-candidate slice. The definitions are
-implemented here; Runner composition and end-to-end DeviceServices routing remain
-unfinished until their own acceptance tests pass.
+These definitions and adapters are implemented on the T01 integration branch.
+They remain proposed shared interfaces until the candidate's acceptance gates pass
+and the integration lead accepts them.
 """
 from __future__ import annotations
 
