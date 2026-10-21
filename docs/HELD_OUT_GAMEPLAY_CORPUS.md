@@ -2,6 +2,43 @@
 
 This protocol produces reviewed evidence for evaluating encounter outcomes. It is a collection and review plan, not an accuracy result. No detector or encounter accuracy claim is supported until the frozen evaluator has been run against the reviewed, held-out test recordings and the report has been checked.
 
+## Intake and review checklist
+
+Copy this checklist into the capture record for each corpus and complete it before publishing evaluation results.
+
+### Intake and capture
+
+- [ ] Capture is from gameplay the operator is permitted to record, and any required participant consent is documented.
+- [ ] Source video is preserved unchanged; its checksum, container/codec, duration, capture rate, device, resolution/scale, game build, and capture method are recorded.
+- [ ] A stable, non-identifying recording ID is assigned; account names, credentials, and precise location details are excluded or redacted.
+- [ ] Every eligible action is logged with unique action ID, recording ID, video timestamp, action type, and action execution status, including uncertain, failed, interrupted, and timeout cases.
+- [ ] The complete source recording is assigned to one split in the canonical registry before annotation or tuning. All fragments and derived episodes inherit that assignment.
+- [ ] The test split is sealed from model and threshold tuning; registry assignments are immutable across later manifests.
+
+### Extraction and evidence integrity
+
+- [ ] The real-video smoke check uses installed `opencv-python` and the actual recording codec in a new temporary output directory.
+- [ ] Sampled frames are compared with the source at known timestamps; image readability, dimensions, and first/last window boundaries are checked.
+- [ ] Source-video and action-log checksums, extractor version, extraction settings, and frame checksums are recorded.
+- [ ] No generated output overwrites an existing manifest or frame; failures leave pre-existing files intact.
+- [ ] Extraction warnings, undecodable windows, missing frames, and exclusions are recorded. They are not silently removed from the action denominator.
+
+### Human review
+
+- [ ] Reviewers inspect the full evidence sequence with model predictions and confidence hidden where practical.
+- [ ] Each action receives one defined truth label, reviewer identity, evidence references, and a reason for `unknown`, disagreement, or exclusion.
+- [ ] A second reviewer independently labels every test episode. Disagreements are adjudicated and both original labels are retained.
+- [ ] Insufficient or contradictory evidence remains `unknown`; it is counted in truth-resolution reporting and never treated as a correct prediction.
+- [ ] The complete canonical manifest has unique action IDs, a persistent recording-split registry, and evidence paths/hashes validated against the stored files.
+
+### Freeze, score, and report
+
+- [ ] Predictor artifact, decision threshold, and analysis procedure are frozen before opening test labels.
+- [ ] Test predictions are bound to the frozen predictor identity; any test-guided change invalidates that test set for final evaluation.
+- [ ] The evaluator runs on the sealed `test` split only after review is complete; command, artifact ID/hash, manifest hash, and report are archived.
+- [ ] Report episode and independent recording counts, truth-resolution rate, unknown prediction/coverage, per-class confusion/support, and recording-level uncertainty where estimable.
+- [ ] Claims are limited to this reviewed corpus and its capture conditions. No detector or catch accuracy is reported before the held-out test has actually been scored and reviewed.
+
 ## 1. Freeze the protocol before capture
 
 Write down the target use, outcome definitions, capture settings, predictor artifact and version, action/event definition, required evidence window, exclusions, and planned metrics before looking at test results. Include the game/app build, device model, screen resolution and scale, capture method, bot commit, model or rule artifact SHA-256, and any decision threshold in the run record. Do not tune the model, thresholds, or labeling rules against the test set.
