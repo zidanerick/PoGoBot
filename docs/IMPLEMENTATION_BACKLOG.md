@@ -357,8 +357,8 @@ The #1 v1.1 APIs below are proposals unless explicitly marked as existing specia
 
 | Contract area | Status |
 |---|---|
-| `MonotonicSeconds`, `ActiveSeconds`, `Clock`, `DeviceSnapshot`/`DeviceServices`, pause mapping | Proposal in #1. #3 has nonblocking pollers and existing legacy time handling, but no shared dual-clock implementation integrated end-to-end. |
-| Immutable `FrameRef` at capture, propagated through Frame/Observation/Evidence/ActionRequest/ActionEvent | Proposal in #1. Current #3 does not implement end-to-end FrameRef propagation. |
+| `MonotonicSeconds`, `ActiveSeconds`, `Clock`, `DeviceSnapshot`/`DeviceServices`, pause mapping | Proposal in #1. T01 candidate implements the type definitions and `SystemClock`, but no Runner/CLI injection or DeviceServices adapter is integrated or accepted. #3 has nonblocking pollers and legacy time handling, not an end-to-end dual-clock seam. |
+| Immutable `FrameRef` at capture, propagated through Frame/Observation/Evidence/ActionRequest/ActionEvent | Proposal in #1. T01 candidate stamps live/replay Frames and propagates through Observation; candidate tests are added but unrun. Evidence/ActionRequest/ActionEvent propagation and production missing-identity rejection remain unimplemented. Current #3 has no end-to-end FrameRef path. |
 | `ActionRequest`, `Submission`, `ActionEvent`, `ActionPort`, `Dispatch`, generation invalidation and cancellation | Proposal in #1. #3 uses `apply(effect)->bool`; #2 has isolated transport receipts, not the common ActionPort. |
 | `Evidence.frame_ref`, runtime `GameOutcome` association, episode-safe outcome rules | Proposal in #1. #4 has offline scoring/extraction, not shared runtime evidence identity or outcome association. |
 | V2 event envelope and accepted/executed/uncertain/outcome accounting | Proposal in #1. No integrated v2 runtime migration. |
