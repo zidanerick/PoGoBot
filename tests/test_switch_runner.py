@@ -480,15 +480,14 @@ def test_the_dashboard_follows_the_new_session():
 
 
 def test_a_pause_before_the_switch_does_not_swallow_the_new_uptime():
-    """The new session inherits the run's paused total - the FSM clock is derived from it -
-    so its start must be on that same clock, or its uptime reads short by every earlier
-    pause and every rate it feeds is wrong."""
+    """Paused time charged to the outgoing account must not reduce new-account uptime."""
     r = make_runner(tree_reader=FakeTreeReader([panel()]))
     real = time.perf_counter()
     r.stats.paused_seconds = 100.0
-    r.ctx.now = real - 100.0            # the invariant the loop maintains
+    r.ctx.now = float(r.clock.monotonic_at(real - 100.0))
     r.stats.account = "TrainerOne"
     r._on_switch_confirmed("TrainerTwo")
+    assert r.stats.paused_seconds == 0.0
     assert r.stats.uptime(now=real + 60.0) == pytest.approx(60.0, abs=1.0)
 
 
@@ -764,7 +763,7 @@ def test_a_silent_but_alive_source_mid_switch_still_halts_the_run():
     src.runner = r
     r.stats.account = "TrainerOne"
     r.ctx.state = BotState.SCANNING
-    r.ctx.now = time.perf_counter()
+    r.ctx.now = float(r.clock.active_now())
     r.ctx.last_map_ts = r.ctx.now
     r._begin_switch("TrainerTwo")
     assert r.ctx.state is BotState.SWITCHING
