@@ -25,6 +25,9 @@ class Frame:
     bgr: np.ndarray
     # Optional during constructor migration; production capture paths attach this.
     frame_ref: Optional[FrameRef] = None
+    # Process-local capture sample, used only to calculate frame age. ``ts`` and
+    # FrameRef carry the run-relative timestamp persisted by callers.
+    captured_perf_s: Optional[float] = None
 
     @property
     def height(self) -> int:
@@ -39,7 +42,8 @@ class Frame:
         return self.width, self.height
 
     def age(self, now: Optional[float] = None) -> float:
-        return (time.perf_counter() if now is None else now) - self.ts
+        captured = self.ts if self.captured_perf_s is None else self.captured_perf_s
+        return (time.perf_counter() if now is None else now) - captured
 
 
 class FrameSource(Protocol):
