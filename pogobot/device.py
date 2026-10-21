@@ -15,6 +15,7 @@ import threading
 import time
 from typing import Optional
 
+from .contracts import Clock, DeviceSnapshot, MonotonicSeconds
 from .observation import Tristate
 
 DEFAULT_WH = (1080, 2340)
@@ -147,5 +148,148 @@ class KeyboardPoller:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+
+
+class FakeDeviceServices:
+    """Deterministic device facts for tests and explicit offline composition."""
+
+    def __init__(self, initial: Optional[DeviceSnapshot] = None):
+        self._snapshot = initial
+        self.calls = 0
+        self.closed = False
+
+    def snapshot(self, now_mono_s: MonotonicSeconds) -> DeviceSnapshot:
+        self.calls += 1
+        if self._snapshot is not None:
+            return self._snapshot
+        return DeviceSnapshot(now_mono_s, Tristate.UNKNOWN, Tristate.UNKNOWN,
+                              Tristate.UNKNOWN, None)
+
+    def set_snapshot(self, snapshot: DeviceSnapshot) -> None:
+        self._snapshot = snapshot
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class ReplayDeviceServices(FakeDeviceServices):
+    """Replay facts are unknown by default and never query the host or an ADB device."""
+
+    @property
+    def external_calls(self) -> int:
+        return 0
+
+
+class LiveDeviceServices:
+    """Nonblocking cached device snapshot populated by one bounded worker thread."""
+
+    def __init__(self, clock: Clock, package: str, adb: str = "adb",
+                 serial: Optional[str] = None, interval: float = 1.0,
+                 max_age: float = 10.0, autostart: bool = True):
+        self.clock = clock
+        self.package = package
+        self.adb = adb
+        self.serial = serial
+        self.interval = max(0.1, float(interval))
+        self.max_age = max(0.1, float(max_age))
+        self._cv = threading.Condition()
+        self._stop = threading.Event()
+        now = clock.monotonic_now()
+        self._snapshot = DeviceSnapshot(now, Tristate.UNKNOWN, Tristate.UNKNOWN,
+                                        Tristate.UNKNOWN, None)
+        self._revision = 0
+        self._thread = threading.Thread(target=self._poll, name="device-services", daemon=True)
+        if autostart:
+            self.start()
+
+    def start(self) -> None:
+        if not self._thread.is_alive() and not self._stop.is_set():
+            self._thread.start()
+
+    def _argv(self, *parts: str) -> list[str]:
+        return [self.adb] + (["-s", self.serial] if self.serial else []) + list(parts)
+
+    def _query(self, *parts: str, timeout: float) -> Optional[str]:
+        try:
+            result = subprocess.run(self._argv(*parts), capture_output=True,
+                                    timeout=timeout)
+        except Exception:
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.decode(errors="replace")
+
+    def _sample(self) -> DeviceSnapshot:
+        state = self._query("get-state", timeout=3.0)
+        online = (Tristate.UNKNOWN if state is None else
+                  Tristate.TRUE if state.strip() == "device" else Tristate.FALSE)
+
+        windows = self._query("shell", "dumpsys", "window", timeout=5.0)
+        foreground = Tristate.UNKNOWN
+        if windows is not None:
+            focus = next((line for line in windows.splitlines()
+                          if "mCurrentFocus" in line), None)
+            if focus is not None:
+                foreground = Tristate.TRUE if self.package in focus else Tristate.FALSE
+
+        size_text = self._query("shell", "wm", "size", timeout=3.0)
+        logical_wh = None
+        if size_text is not None:
+            for pattern in (r"Override size:\s*(\d+)x(\d+)",
+                            r"Physical size:\s*(\d+)x(\d+)"):
+                match = re.search(pattern, size_text)
+                if match:
+                    logical_wh = (int(match.group(1)), int(match.group(2)))
+                    break
+
+        keyboard_text = self._query("shell", "dumpsys", "input_method", timeout=4.0)
+        keyboard = Tristate.UNKNOWN
+        if keyboard_text is not None:
+            if "mInputShown=true" in keyboard_text:
+                keyboard = Tristate.TRUE
+            elif "mInputShown=false" in keyboard_text:
+                keyboard = Tristate.FALSE
+
+        return DeviceSnapshot(self.clock.monotonic_now(), foreground, keyboard,
+                              online, logical_wh)
+
+    def _poll(self) -> None:
+        while not self._stop.is_set():
+            snapshot = self._sample()
+            self.publish(snapshot)
+            self._stop.wait(self.interval)
+
+    def publish(self, snapshot: DeviceSnapshot) -> None:
+        """Atomically publish a completed worker sample; also the fake-clock test seam."""
+        with self._cv:
+            self._snapshot = snapshot
+            self._revision += 1
+            self._cv.notify_all()
+
+    def startup_snapshot(self, timeout: float = 12.0) -> DeviceSnapshot:
+        """Wait only during CLI startup for one cache fill, never from Runner's loop."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._cv:
+            while self._revision == 0 and not self._stop.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._cv.wait(remaining)
+            return self._snapshot
+
+    def snapshot(self, now_mono_s: MonotonicSeconds) -> DeviceSnapshot:
+        with self._cv:
+            snapshot = self._snapshot
+        if float(now_mono_s) - float(snapshot.sampled_mono_s) <= self.max_age:
+            return snapshot
+        return DeviceSnapshot(snapshot.sampled_mono_s, Tristate.UNKNOWN,
+                              Tristate.UNKNOWN, Tristate.UNKNOWN, None)
+
+    def close(self) -> None:
+        self._stop.set()
+        with self._cv:
+            self._cv.notify_all()
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
