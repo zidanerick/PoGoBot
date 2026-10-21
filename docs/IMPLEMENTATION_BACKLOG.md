@@ -27,7 +27,7 @@ These are ownership boundaries, not instructions to launch agents. One owner edi
 
 ## Contract v1.1
 
-**Decision: accept the fail-closed foreground rule.** When foreground is UNKNOWN or stale, no screen-directed action is authorized, including Back and interrupt actions. The Runner must wait for a fresh foreground result or take only bounded non-screen recovery such as a foreground query, restart or halt. This resolves the earlier ambiguity in favor of safety. It is an accepted contract decision, not implemented behavior: #3 test_unknown_foreground_fails_closed_for_every_screen_gesture still expects Back and must change before integration.
+**Decision: accept the fail-closed foreground rule.** When foreground is UNKNOWN or stale, no screen-directed action is authorized, including Back and interrupt actions. The Runner must wait for a fresh foreground result or take only bounded non-screen recovery such as a foreground query, restart or halt. This resolves the earlier ambiguity in favor of safety. It is an accepted contract decision. Current PR #3 source/tests now enforce it: UNKNOWN/stale foreground permits no Back, Tap, Swipe or Pinch; only bounded non-screen recovery may proceed. This behavior still requires integration and preservation on the shared runtime branch.
 
 Types live in proposed `pogobot/contracts.py` unless specified otherwise. Frozen dataclasses and string enums are preferred. The following signatures and semantics are the target public API. Existing public constructors remain valid through defaulted optional additions.
 
