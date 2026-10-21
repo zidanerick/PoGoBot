@@ -245,7 +245,7 @@ Preserve old saved files; read missing schema_version as v1 and retain legacy co
 
 Live PR state sampled immediately before this plan update: #1 `0906456f445964a51e723cefdea44d38eb539da4`, #2 `c6fcf83eea25b2916402c238e5b44feac72b4a49`, #3 `1dbfe97be720e94b48150ed561d31ef7df548d8f`, and #4 `e8e1ec268c88c22b2b6b0024f0faeccb0eaedc75`. All are open and unmerged. This plan update advances PR #1; its new head must be read from GitHub after the write.
 
-At input head `0906456f445964a51e723cefdea44d38eb539da4`, GitHub reports PR #1 `mergeable=true`. Its comparison with `main` is 41 commits ahead, zero behind, with merge base `9795280ec52b67cde316c45aa531e64c39ddd9b8` and only `docs/IMPLEMENTATION_BACKLOG.md` added. Earlier `mergeable=false` samples were not accompanied by a conflicting path; the current API status is true. No merge was performed.
+At input head `0906456f445964a51e723cefdea44d38eb539da4`, GitHub reported PR #1 `mergeable=true` (41 ahead, zero behind). After the plan writes, the new head `11c9af2a5b64f59b2a7545ad7eb62078eebc4d40` was reported `mergeable=false`. Its current comparison is still 43 commits ahead, zero behind, with the same merge base and only `docs/IMPLEMENTATION_BACKLOG.md` added; combined commit statuses are empty. The API provides no conflicting path or reason for the false flag, so the exact cause remains unresolved and may reflect delayed mergeability calculation. No merge was performed.
 
 ### PR head and test-evidence recheck
 
